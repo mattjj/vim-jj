@@ -1,0 +1,133 @@
+*jj.txt*  Jujutsu (jj) support for Vim, in the spirit of fugitive.vim
+
+Author:  Matt Johnson <https://github.com/mattjj>
+License: BSD 3-Clause (see LICENSE in the repository)
+
+==============================================================================
+INTRODUCTION                                    *jj* *jj.vim*
+
+This plugin provides a small, fugitive.vim-flavored interface to the
+Jujutsu version control system (jj).  It works in any jj workspace,
+including secondary workspaces created with `jj workspace add`, where no
+.git directory exists anywhere above the file: workspace discovery only
+ever looks for a .jj directory, and every jj invocation passes an explicit
+--repository flag, so Vim's current directory never matters.
+
+Requires Vim 8.2+ (or Neovim) and a reasonably recent jj (tested with
+0.43; `jj file annotate -T` support is required for :J blame).
+
+==============================================================================
+COMMANDS                                        *jj-commands*
+
+                                                *:J* *:JJ*
+:J                      Show `jj status` output in a scratch window.
+                        `:JJ` is an alias for every form of the command,
+                        for the case where :J is taken by another plugin.
+
+:J {args}               Any subcommand not listed below is passed straight
+                        through to jj, and its output is shown in a scratch
+                        window, e.g. `:J log`, `:J op log`, `:J new`.
+                        In output windows, `q` closes the window and `R`
+                        re-runs the command.  Commands that would open an
+                        editor should be given `-m` style flags instead
+                        (e.g. `:J describe -m message`).  Escape spaces in
+                        arguments with a backslash: `:J describe -m two\ words`
+
+                                                *:J-blame*
+:J blame                Analogous to fugitive's :Git blame.  Run
+                        `jj file annotate` on the current file and show the
+                        annotations in a scroll-bound vertical split to the
+                        left.  In a |jj-object-buffer| for a file at an old
+                        revision, annotates as of that revision.  Extra
+                        arguments are passed to `jj file annotate`.
+                        Running it again (from either window) closes the
+                        blame window.
+
+                        Maps inside the blame window:
+                          q       close the blame window
+                          <CR>    close blame; show the commit that
+                                  introduced the line in the main window
+                          o       show that commit in a horizontal split
+                          O       show that commit in a new tab
+
+                                                *:J-diff*
+:J diff [args]          Analogous to fugitive's :Git diff.  Show `jj diff`
+                        output (in --git format unless you pass a format
+                        flag yourself) in a scratch window with diff
+                        highlighting.  E.g. `:J diff`, `:J diff -r @-`,
+                        `:J diff --stat`.
+
+                                                *:J-diffsplit*
+:J diffsplit [revset]   Analogous to fugitive's :Gdiffsplit.  Vimdiff the
+                        current file against the same file at [revset].
+                        With no argument, diffs against the parent of the
+                        buffer's revision: for a working-copy file that is
+                        @- (i.e. what `jj diff` would show for this file);
+                        for a file at revision X in a |jj-object-buffer|,
+                        it is X-.  Use |:diffget| / |do| to pull hunks from
+                        the historical version, and :diffoff if you close
+                        things in an unexpected order.
+
+                                                *:J-edit*
+:J edit {object}        Analogous to fugitive's :Gedit.  Open a buffer for
+                        a jj object in the current window.  See
+                        |jj-object|.  With no argument, from a
+                        |jj-object-buffer| for a file, return to the
+                        working-copy version of that file.
+
+:J split {object}       Like :J edit, but open in a horizontal split.
+:J vsplit {object}      ... vertical split.
+:J tabedit {object}     ... new tab.
+:J pedit {object}       ... preview window.
+
+                                                *:J-show*
+:J show [args]          `jj show --git` output in a scratch window with
+                        commit/diff highlighting.
+
+==============================================================================
+SPECIFYING OBJECTS                              *jj-object*
+
+:J edit and friends accept the following, echoing fugitive's rev:path
+syntax but with jj revsets:
+
+    {revset}            The commit itself: description plus --git diff,
+                        like `jj show`.  Any revset that resolves to a
+                        single commit works: `@-`, a change id, a bookmark,
+                        `::main` etc.
+    {revset}:{path}     The file {path} (relative to the workspace root)
+                        as of {revset}, e.g. `:J edit @--:src/main.rs`
+    {revset}:           The current file as of {revset}
+    {revset}:%          Ditto
+    :{path}             The file {path} in the working-copy commit @
+
+If the whole argument parses as a revset it is treated as one, so revsets
+containing colons still work without quoting.
+
+                                                *jj-object-buffer*
+Object buffers have names like
+    jj://{root}//{commitid}/{path}
+    jj://{root}//{commitid}
+and are read-only snapshots produced by `jj file show` / `jj show`.
+Revsets are resolved to full commit ids before the buffer is created.
+:J blame, :J diffsplit, and :J edit all work from inside a file object
+buffer, interpreted relative to that buffer's revision.
+
+==============================================================================
+CONFIGURATION                                   *jj-configuration*
+
+g:jj_executable                                 *g:jj_executable*
+        Name or path of the jj binary.  Default: "jj"
+
+g:jj_blame_template                             *g:jj_blame_template*
+        jj template used for each annotation line in :J blame.  It should
+        emit exactly one line per file line and must end with "\n"; it
+        should NOT include the line's content.  See the default in
+        autoload/jj.vim.
+
+==============================================================================
+ABOUT                                           *jj-about*
+
+Heavily inspired by (and with gratitude to) Tim Pope's fugitive.vim:
+https://github.com/tpope/vim-fugitive
+
+ vim:tw=78:et:ft=help:norl:

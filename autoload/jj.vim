@@ -1,0 +1,523 @@
+" autoload/jj.vim - Jujutsu (jj) support for Vim, in the spirit of fugitive.vim
+" Works in any jj workspace, including secondary workspaces created with
+" `jj workspace add` (no .git directory anywhere in the lineage): the only
+" thing we ever look for is a .jj directory, and every jj invocation gets an
+" explicit --repository flag so Vim's cwd never matters.
+
+if exists('g:autoloaded_jj')
+  finish
+endif
+let g:autoloaded_jj = 1
+
+" Section: utility
+
+function! s:throw(string) abort
+  throw 'jj: ' . a:string
+endfunction
+
+function! s:Executable() abort
+  return get(g:, 'jj_executable', 'jj')
+endfunction
+
+" Split a command line into arguments, honoring backslash-escaped spaces
+" (same convention as fugitive: `:J describe -m hello\ world`).
+function! s:ArgSplit(string) abort
+  let string = a:string
+  let args = []
+  while string =~# '\S'
+    let arg = matchstr(string, '^\s*\zs\%(\\.\|\S\)\+')
+    let string = strpart(string, matchend(string, '^\s*\%(\\.\|\S\)\+'))
+    call add(args, substitute(arg, '\\\(\s\)', '\1', 'g'))
+  endwhile
+  return args
+endfunction
+
+" Section: repository detection
+
+function! s:FindRoot(path) abort
+  let dir = fnamemodify(a:path, ':p')
+  if !isdirectory(dir)
+    let dir = fnamemodify(dir, ':h')
+  endif
+  let dir = substitute(dir, '/\+$', '', '')
+  while 1
+    if isdirectory(dir . '/.jj')
+      return dir
+    endif
+    let parent = fnamemodify(dir, ':h')
+    if parent ==# dir
+      return ''
+    endif
+    let dir = parent
+  endwhile
+endfunction
+
+" Workspace root for the current buffer (or for an explicit path argument).
+" Returns '' if not in a jj workspace.
+function! jj#Root(...) abort
+  if a:0
+    return s:FindRoot(a:1)
+  endif
+  if !empty(get(b:, 'jj_root', '')) && isdirectory(b:jj_root . '/.jj')
+    return b:jj_root
+  endif
+  let name = bufname('%')
+  if name =~# '^jj://'
+    let root = s:ParseUrl(name)[0]
+  elseif !empty(name) && &buftype !~# '^\%(nofile\|acwrite\|quickfix\|terminal\|prompt\|popup\)$'
+    let root = s:FindRoot(expand('%:p'))
+  else
+    let root = s:FindRoot(getcwd())
+  endif
+  if !empty(root)
+    let b:jj_root = root
+  endif
+  return root
+endfunction
+
+function! s:Root() abort
+  let root = jj#Root()
+  if empty(root)
+    call s:throw('not inside a jj workspace (no .jj directory found)')
+  endif
+  return root
+endfunction
+
+" Section: running jj
+
+function! s:Argv(root, args, ignore_wc) abort
+  let argv = [s:Executable(), '--repository', a:root, '--no-pager', '--color', 'never']
+  if a:ignore_wc
+    call add(argv, '--ignore-working-copy')
+  endif
+  return argv + a:args
+endfunction
+
+" Run jj with stdout and stderr merged; returns [lines, exit_status].
+function! s:JJ(root, args, ...) abort
+  let argv = s:Argv(a:root, a:args, a:0 && a:1)
+  let cmd = join(map(copy(argv), 'shellescape(v:val)'), ' ') . ' 2>&1'
+  let lines = systemlist(cmd)
+  return [lines, v:shell_error]
+endfunction
+
+" Run jj keeping stdout pristine (for file contents); stderr is captured
+" separately and returned as the error message on failure.
+function! s:JJContent(root, args, ...) abort
+  let argv = s:Argv(a:root, a:args, a:0 && a:1)
+  let errfile = tempname()
+  let cmd = join(map(copy(argv), 'shellescape(v:val)'), ' ') . ' 2>' . shellescape(errfile)
+  let lines = systemlist(cmd)
+  let status = v:shell_error
+  if status
+    let lines = filter(readfile(errfile), '!empty(v:val)')
+  endif
+  call delete(errfile)
+  return [lines, status]
+endfunction
+
+" Resolve a revset to exactly one full commit id.
+function! s:ResolveRev(root, revset) abort
+  let [out, status] = s:JJ(a:root, ['log', '--no-graph', '-n', '2',
+        \ '-r', a:revset, '-T', 'commit_id ++ "\n"'])
+  if status
+    call s:throw(join(out, ' '))
+  endif
+  call filter(out, 'v:val =~# ''^\x\+$''')
+  if empty(out)
+    call s:throw('revset resolved to no commits: ' . a:revset)
+  elseif len(out) > 1
+    call s:throw('revset resolved to multiple commits: ' . a:revset)
+  endif
+  return out[0]
+endfunction
+
+" Section: jj:// object URLs
+"
+" Files at a revision:  jj://<workspace root>//<commit id>/<repo-relative path>
+" Commits (jj show):    jj://<workspace root>//<commit id>
+" Revsets are resolved to full commit ids *before* the URL is built, so the
+" URL grammar stays unambiguous no matter what characters a revset contains.
+
+function! s:ParseUrl(url) abort
+  let m = matchlist(a:url, '^jj://\(.\{-}\)//\(\x\+\)\%(/\(.*\)\)\=$')
+  if empty(m)
+    return ['', '', '']
+  endif
+  return [m[1], m[2], m[3]]
+endfunction
+
+function! s:Url(root, cid, path) abort
+  return 'jj://' . a:root . '//' . a:cid . (empty(a:path) ? '' : '/' . a:path)
+endfunction
+
+" Escape a repo-relative path for use in a jj fileset expression.
+function! s:Fileset(path) abort
+  let path = substitute(a:path, '\\', '\\\\', 'g')
+  let path = substitute(path, '"', '\\"', 'g')
+  return 'root:"' . path . '"'
+endfunction
+
+" Repo-relative path of the current buffer within root.
+function! s:BufPath(root) abort
+  let name = bufname('%')
+  if name =~# '^jj://'
+    let [root, _, path] = s:ParseUrl(name)
+    if root !=# a:root
+      call s:throw('buffer belongs to a different workspace: ' . root)
+    endif
+    if empty(path)
+      call s:throw('not a file buffer')
+    endif
+    return path
+  endif
+  let name = fnamemodify(name, ':p')
+  let prefix = a:root . '/'
+  if strpart(name, 0, len(prefix)) ==# prefix
+    return strpart(name, len(prefix))
+  endif
+  call s:throw('file is not inside the jj workspace: ' . name)
+endfunction
+
+" Commit id backing the current buffer: for jj:// buffers, the commit in the
+" URL; for regular files, the working-copy commit @.
+function! s:BufRev(root) abort
+  let name = bufname('%')
+  if name =~# '^jj://'
+    return s:ParseUrl(name)[1]
+  endif
+  return '@'
+endfunction
+
+function! jj#BufReadCmd(amatch) abort
+  let [root, cid, path] = s:ParseUrl(a:amatch)
+  if empty(root)
+    return 'echoerr "jj: invalid jj:// URL"'
+  endif
+  let b:jj_root = root
+  try
+    if empty(path)
+      let [lines, status] = s:JJContent(root, ['show', '--git', '-r', cid], 1)
+    else
+      let [lines, status] = s:JJContent(root, ['file', 'show', '-r', cid, '--', s:Fileset(path)], 1)
+    endif
+    setlocal noswapfile buftype=nowrite
+    setlocal modifiable noreadonly
+    let ul = &l:undolevels
+    setlocal undolevels=-1
+    silent keepjumps %delete _
+    if !empty(lines)
+      call setline(1, lines)
+    endif
+    let &l:undolevels = ul
+    setlocal nomodified nomodifiable readonly
+    if status
+      return 'echoerr ' . string('jj: ' . join(lines, ' '))
+    endif
+    if empty(path)
+      setlocal filetype=git
+    else
+      exe 'doautocmd filetypedetect BufRead ' . fnameescape(root . '/' . path)
+    endif
+    return ''
+  catch /^jj:/
+    return 'echoerr ' . string(v:exception)
+  endtry
+endfunction
+
+" Section: :J edit / split / vsplit / tabedit / pedit
+
+" Interpret an object argument:
+"   ''            -> from a jj:// file buffer, the working-copy file;
+"                    otherwise an error
+"   <revset>      -> the commit itself (like fugitive's :Gedit <commit>)
+"   <revset>:<path> -> the file <path> (repo-relative) at <revset>
+"   <revset>:     -> the current file at <revset>
+"   :<path>       -> <path> in the working-copy commit @
+" A whole-argument revset wins over the rev:path split, so revsets that
+" contain colons (e.g. ::main) still work unquoted.
+function! s:ParseObject(root, arg) abort
+  let arg = a:arg
+  if arg =~# ':'
+    try
+      return [s:ResolveRev(a:root, arg), '']
+    catch /^jj:.*multiple commits/
+      " A valid revset, just not a singleton: report that rather than
+      " misparsing it as rev:path.
+      throw v:exception
+    catch /^jj:/
+    endtry
+    let rev = matchstr(arg, '^[^:]*')
+    let path = matchstr(arg, ':\zs.*')
+    if empty(rev)
+      let rev = '@'
+    endif
+    if empty(path) || path ==# '%'
+      let path = s:BufPath(a:root)
+    endif
+    return [s:ResolveRev(a:root, rev), path]
+  endif
+  return [s:ResolveRev(a:root, arg), '']
+endfunction
+
+function! s:EditCommand(cmd, mods, arg) abort
+  let root = s:Root()
+  if empty(a:arg)
+    let name = bufname('%')
+    if name =~# '^jj://'
+      let [r, cid, path] = s:ParseUrl(name)
+      if empty(path)
+        call s:throw('no file associated with this commit buffer')
+      endif
+      exe s:Mods(a:mods) . a:cmd . ' ' . fnameescape(r . '/' . path)
+      return ''
+    endif
+    call s:throw('nothing to do: already editing the working copy')
+  endif
+  let [cid, path] = s:ParseObject(root, a:arg)
+  exe s:Mods(a:mods) . a:cmd . ' ' . fnameescape(s:Url(root, cid, path))
+  return ''
+endfunction
+
+function! s:Mods(mods) abort
+  let mods = substitute(a:mods, '\C<mods>', '', '')
+  return empty(mods) ? '' : mods . ' '
+endfunction
+
+" Section: :J diffsplit
+
+function! s:DiffSplit(mods, arg) abort
+  let root = s:Root()
+  let path = s:BufPath(root)
+  if empty(a:arg)
+    let rev = s:BufRev(root) . '-'
+  else
+    let rev = a:arg
+  endif
+  let cid = s:ResolveRev(root, rev)
+  " Validate up front so we don't enter diff mode against an error buffer.
+  let [lines, status] = s:JJContent(root, ['file', 'show', '-r', cid, '--', s:Fileset(path)], 1)
+  if status
+    call s:throw(join(lines, ' '))
+  endif
+  let url = s:Url(root, cid, path)
+  diffthis
+  let origin = win_getid()
+  let mods = empty(s:Mods(a:mods)) ? 'keepalt leftabove vertical ' : 'keepalt ' . s:Mods(a:mods)
+  exe mods . 'split ' . fnameescape(url)
+  diffthis
+  let b:jj_diff_origin = origin
+  augroup jj_diff
+    exe 'autocmd! BufWinLeave <buffer=' . bufnr('') . '> ++once call s:DiffRestore(getbufvar(str2nr(expand("<abuf>")), "jj_diff_origin", 0))'
+  augroup END
+  call win_gotoid(origin)
+  return ''
+endfunction
+
+function! s:DiffRestore(origin) abort
+  if a:origin && win_id2win(a:origin) && getwinvar(win_id2win(a:origin), '&diff')
+    call win_execute(a:origin, 'diffoff')
+  endif
+endfunction
+
+" Section: :J blame
+
+let s:blame_template =
+      \ 'separate(" ",'
+      \ . ' commit.change_id().shortest(8),'
+      \ . ' pad_end(10, truncate_end(10, commit.author().email().local())),'
+      \ . ' commit.author().timestamp().local().format("%Y-%m-%d %H:%M"),'
+      \ . ' pad_start(4, line_number)'
+      \ . ') ++ "\n"'
+
+function! s:Blame(mods, args) abort
+  let root = s:Root()
+  " Toggle: if we're already in a blame window, or one exists for this
+  " buffer, close it.
+  if !empty(get(b:, 'jj_blame', {}))
+    close
+    return ''
+  endif
+  for winnr in range(1, winnr('$'))
+    let blame = getbufvar(winbufnr(winnr), 'jj_blame', {})
+    if get(blame, 'origin', -1) == win_getid()
+      exe winnr . 'wincmd c'
+      return ''
+    endif
+  endfor
+  if &modified
+    call s:throw('buffer is modified; write it first')
+  endif
+  let path = s:BufPath(root)
+  let rev = s:BufRev(root)
+  let template = get(g:, 'jj_blame_template', s:blame_template)
+  let cmd = ['file', 'annotate', '-r', rev, '-T', template] + a:args
+        \ + ['--', root . '/' . path]
+  " Annotating @ snapshots the working copy first, so the on-disk file (which
+  " we just verified matches the buffer) is exactly what gets annotated.
+  let [lines, status] = s:JJContent(root, cmd, rev !=# '@')
+  if status
+    call s:throw(join(lines, ' '))
+  endif
+  let width = max(map(copy(lines), 'strdisplaywidth(v:val)')) + 1
+
+  " Configure the origin window like fugitive does, remembering what to
+  " restore when the blame window goes away.
+  let origin = win_getid()
+  let restore = 'setlocal'
+        \ . (&l:scrollbind ? '' : ' noscrollbind')
+        \ . (&l:wrap ? ' wrap' : '')
+        \ . (&l:foldenable ? ' foldenable' : '')
+  setlocal scrollbind nowrap nofoldenable
+  let top = line('w0') + &scrolloff
+  let current = line('.')
+
+  exe 'silent keepalt leftabove vertical ' . width . ' new'
+  setlocal buftype=nofile bufhidden=wipe noswapfile nomodified
+  silent! exe 'file ' . fnameescape('jj-blame://' . path)
+  call setline(1, lines)
+  setlocal nomodified nomodifiable readonly
+  setlocal scrollbind nowrap nofoldenable nonumber norelativenumber
+  setlocal foldcolumn=0 signcolumn=no winfixwidth cursorline
+  setlocal filetype=jjblame
+  let b:jj_root = root
+  let b:jj_blame = {'origin': origin, 'restore': restore, 'path': path}
+  exe top
+  normal! zt
+  exe current
+  syncbind
+
+  nnoremap <buffer> <silent> q :close<CR>
+  nnoremap <buffer> <silent> <CR> :call <SID>BlameJump('')<CR>
+  nnoremap <buffer> <silent> o :call <SID>BlameJump('split')<CR>
+  nnoremap <buffer> <silent> O :call <SID>BlameJump('tabedit')<CR>
+  augroup jj_blame
+    exe 'autocmd! BufWinLeave <buffer=' . bufnr('') . '> ++once call s:BlameRestore(getbufvar(str2nr(expand("<abuf>")), "jj_blame", {}))'
+  augroup END
+  return ''
+endfunction
+
+function! s:BlameRestore(blame) abort
+  let origin = get(a:blame, 'origin', 0)
+  if origin && win_id2win(origin)
+    call win_execute(origin, get(a:blame, 'restore', ''))
+  endif
+endfunction
+
+function! s:BlameJump(cmd) abort
+  let blame = get(b:, 'jj_blame', {})
+  if empty(blame)
+    return
+  endif
+  let root = b:jj_root
+  let change = matchstr(getline('.'), '^\S\+')
+  if empty(change)
+    return
+  endif
+  let lnum = line('.')
+  try
+    let cid = s:ResolveRev(root, change)
+  catch /^jj:/
+    echohl ErrorMsg | echomsg v:exception | echohl NONE
+    return
+  endtry
+  let url = s:Url(root, cid, '')
+  if empty(a:cmd)
+    " Like fugitive's <CR>: leave blame, show the commit in the origin window.
+    let origin = blame.origin
+    close
+    if win_id2win(origin)
+      call win_gotoid(origin)
+    endif
+    exe 'edit ' . fnameescape(url)
+    exe 'silent! keepjumps normal! ' . lnum . 'G'
+  else
+    if win_id2win(blame.origin)
+      call win_gotoid(blame.origin)
+    endif
+    exe a:cmd . ' ' . fnameescape(url)
+  endif
+endfunction
+
+" Section: command output buffers (:J st, :J log, :J diff, ...)
+
+function! s:Output(mods, args, filetype) abort
+  let root = s:Root()
+  let [lines, status] = s:JJ(root, a:args)
+  if status && empty(lines)
+    call s:throw('command failed: jj ' . join(a:args, ' '))
+  endif
+  let mods = empty(s:Mods(a:mods)) ? 'botright ' : s:Mods(a:mods)
+  exe 'silent keepalt ' . mods . 'new'
+  setlocal buftype=nofile bufhidden=wipe noswapfile
+  silent! exe 'file ' . fnameescape('jj-out://' . join(a:args, ' '))
+  call setline(1, empty(lines) ? ['(no output)'] : lines)
+  setlocal nomodified nomodifiable readonly nowrap
+  let b:jj_root = root
+  let b:jj_args = a:args
+  if !empty(a:filetype)
+    let &l:filetype = a:filetype
+  endif
+  nnoremap <buffer> <silent> q :close<CR>
+  nnoremap <buffer> <silent> R :call <SID>OutputRefresh()<CR>
+  if status
+    echohl WarningMsg | echomsg 'jj exited with an error' | echohl NONE
+  endif
+  " Shrink the window if the output is short.
+  if len(lines) < winheight(0) && a:mods !~# 'vert'
+    exe 'resize ' . max([len(lines), 1])
+  endif
+  return ''
+endfunction
+
+function! s:OutputRefresh() abort
+  let [lines, status] = s:JJ(b:jj_root, b:jj_args)
+  setlocal modifiable noreadonly
+  silent keepjumps %delete _
+  call setline(1, empty(lines) ? ['(no output)'] : lines)
+  setlocal nomodified nomodifiable readonly
+endfunction
+
+let s:diff_format_flags = '^\%(-s\|--summary\|--stat\|--types\|--git\|--color-words\|--name-only\|--tool\|-t\)'
+
+" Section: :J dispatcher
+
+function! jj#Command(bang, mods, arg) abort
+  try
+    let args = s:ArgSplit(a:arg)
+    let sub = get(args, 0, '')
+    let rest = args[1:-1]
+    if empty(sub)
+      return s:Output(a:mods, ['status'], '')
+    elseif sub ==# 'blame' || sub ==# 'annotate'
+      return s:Blame(a:mods, rest)
+    elseif sub ==# 'diffsplit'
+      return s:DiffSplit(a:mods, join(rest, ' '))
+    elseif sub =~# '^\%(edit\|split\|vsplit\|tabedit\|pedit\)$'
+      return s:EditCommand(sub, a:mods, join(rest, ' '))
+    elseif sub ==# 'diff'
+      let format = !empty(filter(copy(rest), 'v:val =~# s:diff_format_flags'))
+      return s:Output(a:mods, args + (format ? [] : ['--git']),
+            \ format ? '' : 'diff')
+    elseif sub ==# 'show'
+      let format = !empty(filter(copy(rest), 'v:val =~# s:diff_format_flags'))
+      return s:Output(a:mods, args + (format ? [] : ['--git']), 'git')
+    else
+      return s:Output(a:mods, args, '')
+    endif
+  catch /^jj:/
+    return 'echoerr ' . string(v:exception)
+  endtry
+endfunction
+
+function! jj#Complete(arglead, cmdline, cursorpos) abort
+  let subcommands = ['blame', 'diff', 'diffsplit', 'edit', 'split', 'vsplit',
+        \ 'tabedit', 'pedit', 'status', 'log', 'show', 'describe', 'new',
+        \ 'commit', 'squash', 'abandon', 'bookmark', 'rebase', 'restore',
+        \ 'undo', 'op', 'workspace', 'file', 'evolog', 'absorb']
+  let lead = matchstr(a:cmdline, '^\s*\a\+!\=\s\+\zs.*')
+  if lead !~# '\s'
+    return filter(subcommands, 'strpart(v:val, 0, len(a:arglead)) ==# a:arglead')
+  endif
+  return []
+endfunction
