@@ -232,7 +232,9 @@ endfunction
 " Interpret an object argument:
 "   ''            -> from a jj:// file buffer, the working-copy file;
 "                    otherwise an error
-"   <revset>      -> the commit itself (like fugitive's :Gedit <commit>)
+"   <revset>      -> the current file as of <revset>; from a buffer with
+"                    no file (an output window, a commit view), the
+"                    commit itself instead
 "   <revset>:<path> -> the file <path> (repo-relative) at <revset>
 "   <revset>:     -> the current file at <revset>
 "   :<path>       -> <path> in the working-copy commit @
@@ -242,7 +244,7 @@ function! s:ParseObject(root, arg) abort
   let arg = a:arg
   if arg =~# ':'
     try
-      return [s:ResolveRev(a:root, arg), '']
+      return [s:ResolveRev(a:root, arg), s:BufPathMaybe(a:root)]
     catch /^jj:.*multiple commits/
       " A valid revset, just not a singleton: report that rather than
       " misparsing it as rev:path.
@@ -259,7 +261,17 @@ function! s:ParseObject(root, arg) abort
     endif
     return [s:ResolveRev(a:root, rev), path]
   endif
-  return [s:ResolveRev(a:root, arg), '']
+  return [s:ResolveRev(a:root, arg), s:BufPathMaybe(a:root)]
+endfunction
+
+" The current buffer's repo-relative path, or '' when the buffer has no
+" file in the workspace (output windows, commit views, unnamed buffers).
+function! s:BufPathMaybe(root) abort
+  try
+    return s:BufPath(a:root)
+  catch /^jj:/
+    return ''
+  endtry
 endfunction
 
 function! s:EditCommand(cmd, mods, arg) abort

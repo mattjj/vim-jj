@@ -145,10 +145,12 @@ SPECIFYING OBJECTS                              *jj-object*
 :J edit and friends accept the following, echoing fugitive's rev:path
 syntax but with jj revsets:
 
-    {revset}            The commit itself: description plus --git diff,
-                        like `jj show`.  Any revset that resolves to a
-                        single commit works: `@-`, a change id, a bookmark,
-                        `::main` etc.
+    {revset}            The current file as of {revset}.  Any revset
+                        that resolves to a single commit works: `@-`, a
+                        change id, a bookmark, etc.  From a buffer with
+                        no file (an output window, a commit view), the
+                        commit itself instead: description plus --git
+                        diff, like `jj show`.
     {revset}:{path}     The file {path} (relative to the workspace root)
                         as of {revset}, e.g. `:J edit @--:src/main.rs`
     {revset}:           The current file as of {revset}
