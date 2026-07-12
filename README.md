@@ -13,6 +13,25 @@ secondary workspaces created with `jj workspace add`, where there is no
 looks for a `.jj` directory, and every `jj` invocation passes an explicit
 `--repository` flag, so Vim's current directory never matters either.
 
+## Screenshots
+
+`:J log` — jj's colored graph rendered inside Vim with text properties,
+bold unique-prefix change ids and all. Hit `<CR>` on a line to open that
+commit:
+
+<img src="assets/log.png" width="760" alt=":J log with jj's terminal colors">
+
+`:J blame` — a scroll-bound annotation column, each change id in a stable
+color:
+
+<img src="assets/blame.png" width="760" alt=":J blame with colored change ids">
+
+`:J diffsplit!` — three-pane conflict resolution: side 1, the working
+file with markers, side 2. `d2o`/`d3o` pull a region from either side;
+edit, `:w`, done:
+
+<img src="assets/merge.png" width="760" alt=":J diffsplit! three-pane merge view">
+
 ## Commands
 
 fugitive | vim-jj | what it does
