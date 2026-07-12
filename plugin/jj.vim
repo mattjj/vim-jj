@@ -9,7 +9,11 @@ let g:loaded_jj = 1
 command! -bang -bar -nargs=* -complete=customlist,jj#Complete JJ
       \ exe jj#Command(<bang>0, <q-mods>, <q-args>)
 
-if empty(maparg(':J', 'c')) && !exists(':J')
+" exists(':J') is also nonzero when :J is merely a PREFIX of other commands
+" (including our own :JJ above), so test for an exact match (== 2).
+" Otherwise :J is never defined, and typing :J works only until some other
+" plugin adds a second J-prefixed command - then it's E464, ambiguous.
+if exists(':J') != 2
   command! -bang -bar -nargs=* -complete=customlist,jj#Complete J
         \ exe jj#Command(<bang>0, <q-mods>, <q-args>)
 endif
