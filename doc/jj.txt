@@ -40,6 +40,8 @@ COMMANDS                                        *jj-commands*
                                   on the current line (great in :J log)
                           o       ... in a horizontal split
                           O       ... in a new tab
+                          gf      open the file the command was run from,
+                                  as of the commit on the current line
 
                                                 *:J-blame*
 :J blame                Analogous to fugitive's :Git blame.  Run
@@ -57,6 +59,8 @@ COMMANDS                                        *jj-commands*
                                   introduced the line in the main window
                           o       show that commit in a horizontal split
                           O       show that commit in a new tab
+                          gf      close blame; show the blamed file as of
+                                  that commit in the main window
 
                                                 *:J-diff*
 :J diff [args]          Analogous to fugitive's :Git diff.  Show `jj diff`

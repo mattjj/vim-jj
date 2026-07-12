@@ -550,6 +550,7 @@ function! s:Blame(mods, args) abort
   nnoremap <buffer> <silent> <CR> :call <SID>BlameJump('')<CR>
   nnoremap <buffer> <silent> o :call <SID>BlameJump('split')<CR>
   nnoremap <buffer> <silent> O :call <SID>BlameJump('tabedit')<CR>
+  nnoremap <buffer> <silent> gf :call <SID>BlameJump('', 1)<CR>
   augroup jj_blame
     exe 'autocmd! BufWinLeave <buffer=' . bufnr('') . '> ++once call s:BlameRestore(getbufvar(str2nr(expand("<abuf>")), "jj_blame", {}))'
   augroup END
@@ -588,7 +589,9 @@ function! s:BlameRestore(blame) abort
   endif
 endfunction
 
-function! s:BlameJump(cmd) abort
+" Open the commit for the blame line, or with a truthy extra argument the
+" blamed file as of that commit (gf).
+function! s:BlameJump(cmd, ...) abort
   let blame = get(b:, 'jj_blame', {})
   if empty(blame)
     return
@@ -605,7 +608,7 @@ function! s:BlameJump(cmd) abort
     echohl ErrorMsg | echomsg v:exception | echohl NONE
     return
   endtry
-  let url = s:Url(root, cid, '')
+  let url = s:Url(root, cid, a:0 && a:1 ? blame.path : '')
   if empty(a:cmd)
     " Like fugitive's <CR>: leave blame, show the commit in the origin window.
     let origin = blame.origin
@@ -823,6 +826,9 @@ endfunction
 
 function! s:Output(mods, args, filetype) abort
   let root = s:Root()
+  " Remember which file the command was run from, so gf can open it at a
+  " commit picked from the output.
+  let path = s:BufPathMaybe(root)
   " Buffers with a filetype get Vim syntax highlighting; everything else
   " gets jj's own colors.
   let color = empty(a:filetype) && s:AnsiSupported()
@@ -837,6 +843,7 @@ function! s:Output(mods, args, filetype) abort
   let b:jj_root = root
   let b:jj_args = a:args
   let b:jj_color = color
+  let b:jj_path = path
   call s:OutputFill(lines, color)
   if !empty(a:filetype)
     let &l:filetype = a:filetype
@@ -846,6 +853,7 @@ function! s:Output(mods, args, filetype) abort
   nnoremap <buffer> <silent> <CR> :<C-U>call <SID>OutputOpen('edit')<CR>
   nnoremap <buffer> <silent> o :<C-U>call <SID>OutputOpen('split')<CR>
   nnoremap <buffer> <silent> O :<C-U>call <SID>OutputOpen('tabedit')<CR>
+  nnoremap <buffer> <silent> gf :<C-U>call <SID>OutputGf()<CR>
   call s:MapHunkNav()
   if status
     echohl WarningMsg | echomsg 'jj exited with an error' | echohl NONE
@@ -862,9 +870,9 @@ function! s:OutputRefresh() abort
   call s:OutputFill(lines, get(b:, 'jj_color', 0))
 endfunction
 
-" Open the commit whose change id (or commit id) appears on the current
-" line, e.g. from :J log or :J status output.
-function! s:OutputOpen(cmd) abort
+" Resolve the change id (or commit id) on the current output line to a
+" full commit id; returns '' (with a message) if there isn't one.
+function! s:OutputResolveLine() abort
   let line = getline('.')
   let token = matchstr(line, '\<[k-z]\{8,}\>')
   if empty(token)
@@ -875,15 +883,37 @@ function! s:OutputOpen(cmd) abort
   endif
   if empty(token)
     echo 'jj: no revision found on this line'
-    return
+    return ''
   endif
   try
-    let cid = s:ResolveRev(b:jj_root, token)
+    return s:ResolveRev(b:jj_root, token)
   catch /^jj:/
     echohl ErrorMsg | echomsg v:exception | echohl NONE
-    return
+    return ''
   endtry
-  exe a:cmd . ' ' . fnameescape(s:Url(b:jj_root, cid, ''))
+endfunction
+
+" <CR>/o/O: open the commit on the current line, e.g. from :J log or
+" :J status output.
+function! s:OutputOpen(cmd) abort
+  let cid = s:OutputResolveLine()
+  if !empty(cid)
+    exe a:cmd . ' ' . fnameescape(s:Url(b:jj_root, cid, ''))
+  endif
+endfunction
+
+" gf: open the file this output window was created from, as of the commit
+" on the current line.
+function! s:OutputGf() abort
+  let path = get(b:, 'jj_path', '')
+  if empty(path)
+    echo 'jj: this window has no associated file; use :J edit <rev>:<path>'
+    return
+  endif
+  let cid = s:OutputResolveLine()
+  if !empty(cid)
+    exe 'edit ' . fnameescape(s:Url(b:jj_root, cid, path))
+  endif
 endfunction
 
 let s:diff_format_flags = '^\%(-s\|--summary\|--stat\|--types\|--git\|--color-words\|--name-only\|--tool\|-t\)'

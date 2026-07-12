@@ -54,8 +54,10 @@ fugitive | vim-jj | what it does
   for plain text.
 - **Navigable log/status.** In any output window, `<CR>` opens the commit
   whose change id is on the current line (`o` for a split, `O` for a tab,
-  `R` refreshes, `q` closes). `:J log`, hit `<CR>` on a commit, `]c` through
-  its hunks.
+  `R` refreshes, `q` closes), and `gf` opens the file you came from as of
+  that commit. Same in `:J blame`: `<CR>` for the commit, `gf` for the
+  file back then. `:J log`, hit `<CR>` on a commit, `]c` through its
+  hunks.
 - **Colorful blame.** Each change id in `:J blame` gets a stable rotating
   color, fugitive-style.
 - **Statusline.** `set statusline+=%{jj#Statusline()}` shows e.g.
