@@ -20,6 +20,7 @@ fugitive | vim-jj | what it does
 `:Git blame` | `:J blame` | annotations for the current file in a scroll-bound left split (`q` to close, `<CR>` to open the commit that introduced a line, `o` for a split)
 `:Git diff` | `:J diff [args]` | `jj diff --git` output in a scratch window with diff highlighting (`:J diff -r @-`, `:J diff --stat`, ...)
 `:Gdiffsplit` | `:J diffsplit [revset]` | vimdiff the current file against the same file at `revset` (default: the parent of the buffer's revision, i.e. `@-` for a working-copy file)
+`:Gdiffsplit!` | `:J diffsplit!` | three-pane merge view for a conflicted file: side 1 \| working file \| side 2, all in diff mode, with fugitive's `d2o`/`d3o` to pull a conflict region from the left/right pane and `dp` in a side pane to push; resolve, `:w`, done (jj has no "mark resolved" step)
 `:Gedit` | `:J edit {object}` | open a read-only buffer for a jj object: `:J edit @-` (a commit, like `jj show`), `:J edit @-:src/main.rs` (a file at a revision), `:J edit @-:%` (the current file at a revision)
 `:Gsplit` etc. | `:J split` / `:J vsplit` / `:J tabedit` / `:J pedit` | same, in a split/tab/preview window
 `:Git <anything>` | `:J <anything>` | any other subcommand is passed through to jj and its output shown in a scratch window: `:J`, (= `jj status`), `:J log`, `:J new`, `:J describe -m msg`, `:J op log`, ...
@@ -30,6 +31,11 @@ diffsplit` diffs against that revision's parent, and `:J edit` (no
 argument) takes you back to the working copy.
 
 `:JJ` is an alias for `:J` in case another plugin owns `:J`.
+
+`]c` and `[c` behave as in fugitive: in patch-displaying buffers
+(`:J diff`, `:J show`, commit buffers) they jump between `@@` hunk
+headers; in diff-mode views (`:J diffsplit`, the three-pane merge) Vim's
+native jump-between-changes applies.
 
 ## Installation
 

@@ -66,7 +66,13 @@ COMMANDS                                        *jj-commands*
                         for a file at revision X in a |jj-object-buffer|,
                         it is X-.  Use |:diffget| / |do| to pull hunks from
                         the historical version, and :diffoff if you close
-                        things in an unexpected order.
+                        things in an unexpected order.  Vim's native |]c|
+                        and |[c| jump between changes, as in any diff view.
+
+                                                *:J-diffsplit!*
+:J diffsplit!           Analogous to fugitive's :Gdiffsplit! on a
+                        conflicted file: a three-pane merge view.  See
+                        |jj-merge|.
 
                                                 *:J-edit*
 :J edit {object}        Analogous to fugitive's :Gedit.  Open a buffer for
@@ -83,6 +89,47 @@ COMMANDS                                        *jj-commands*
                                                 *:J-show*
 :J show [args]          `jj show --git` output in a scratch window with
                         commit/diff highlighting.
+
+                                                *jj-]c* *jj-[c*
+In buffers that display patches (:J diff, :J show, and commit object
+buffers), ]c and [c jump to the next/previous @@ hunk header, as in
+fugitive's buffers.  In diff-mode windows (:J diffsplit and the
+|jj-merge| view) they retain Vim's native jump-between-changes behavior.
+
+==============================================================================
+RESOLVING CONFLICTS                             *jj-merge* *jj-conflicts*
+
+jj materializes conflicts as marker blocks in the working copy, and a file
+counts as resolved as soon as it contains no markers the next time jj
+snapshots the working copy (i.e. on your next jj command) - there is no
+"mark as resolved" step like `git add`.
+
+On a conflicted file, `:J diffsplit!` opens a three-pane merge view, like
+fugitive's :Gdiffsplit!:
+
+    [side #1]      [working file]      [side #2]
+
+The middle pane is the real file, markers and all; the outer panes are
+read-only reconstructions of the two sides of the conflict (their commits
+are echoed when the view opens).  All three are in diff mode, so Vim's
+native |]c| / |[c| jump between conflict regions, exactly as in fugitive.
+
+Maps, mirroring fugitive:
+
+    d2o     (middle pane) pull the conflict region from side #1
+    d3o     (middle pane) pull the conflict region from side #2
+    dp      (side panes)  push the region into the middle pane
+    q       (side panes)  close the pane
+
+You can also edit the middle pane by hand (e.g. delete marker lines,
+combine both sides).  When it's the way you want it, |:w| it; the next jj
+command (`:J`, `:J resolve --list`, ...) snapshots the working copy and
+the conflict is gone.  Closing the last side pane takes the middle window
+back out of diff mode.
+
+Conflicts with more than two sides (rare, from octopus-y histories) are
+not supported by the three-pane view; use `jj resolve` or edit the
+markers directly.
 
 ==============================================================================
 SPECIFYING OBJECTS                              *jj-object*

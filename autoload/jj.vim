@@ -216,6 +216,7 @@ function! jj#BufReadCmd(amatch) abort
     endif
     if empty(path)
       setlocal filetype=git
+      call s:MapHunkNav()
     else
       exe 'doautocmd filetypedetect BufRead ' . fnameescape(root . '/' . path)
     endif
@@ -286,7 +287,10 @@ endfunction
 
 " Section: :J diffsplit
 
-function! s:DiffSplit(mods, arg) abort
+function! s:DiffSplit(mods, arg, bang) abort
+  if a:bang
+    return s:MergeSplit(a:mods)
+  endif
   let root = s:Root()
   let path = s:BufPath(root)
   if empty(a:arg)
@@ -294,7 +298,15 @@ function! s:DiffSplit(mods, arg) abort
   else
     let rev = a:arg
   endif
-  let cid = s:ResolveRev(root, rev)
+  try
+    let cid = s:ResolveRev(root, rev)
+  catch /^jj:.*multiple commits/
+    if empty(a:arg)
+      call s:throw('revision has multiple parents; use :J diffsplit! for a '
+            \ . 'three-pane merge view, or pass an explicit revset')
+    endif
+    throw v:exception
+  endtry
   " Validate up front so we don't enter diff mode against an error buffer.
   let [lines, status] = s:JJContent(root, ['file', 'show', '-r', cid, '--', s:Fileset(path)], 1)
   if status
@@ -317,6 +329,139 @@ endfunction
 function! s:DiffRestore(origin) abort
   if a:origin && win_id2win(a:origin) && getwinvar(win_id2win(a:origin), '&diff')
     call win_execute(a:origin, 'diffoff')
+  endif
+endfunction
+
+" Section: :J diffsplit! (three-pane merge view)
+
+" Parse a git-marker-style materialized conflict into full texts for each
+" side.  Non-conflict lines are shared by side1, base, and side2; each
+" conflict region contributes its own lines to the respective text.
+function! s:ParseGitMarkers(lines) abort
+  let out = {'conflicted': 0, 'multiway': 0, 'side1': [], 'base': [],
+        \ 'side2': [], 'label1': '', 'label2': ''}
+  let state = 0
+  for line in a:lines
+    if state == 0
+      if line =~# '^<\{7,}\%( \|$\)'
+        let state = 1
+        let out.conflicted = 1
+        if empty(out.label1)
+          let out.label1 = matchstr(line, '^<\{7,} \zs.*')
+        endif
+      else
+        call add(out.side1, line)
+        call add(out.base, line)
+        call add(out.side2, line)
+      endif
+    elseif state == 1
+      if line =~# '^|\{7,}\%( \|$\)'
+        let state = 2
+      elseif line =~# '^%\{7,}\|^+\{7,}'
+        " jj emits its default diff-style markers instead of git-style ones
+        " when a conflict has more than two sides
+        let out.multiway = 1
+        return out
+      else
+        call add(out.side1, line)
+      endif
+    elseif state == 2
+      if line =~# '^=\{7,}$'
+        let state = 3
+      else
+        call add(out.base, line)
+      endif
+    elseif state == 3
+      if line =~# '^>\{7,}\%( \|$\)'
+        let state = 0
+        if empty(out.label2)
+          let out.label2 = matchstr(line, '^>\{7,} \zs.*')
+        endif
+      else
+        call add(out.side2, line)
+      endif
+    endif
+  endfor
+  return out
+endfunction
+
+" Like fugitive's :Gdiffsplit! on a conflicted file: side 1 on the left,
+" the working file (with conflict markers) in the middle, side 2 on the
+" right, all in diff mode.  d2o/d3o in the middle pull a hunk from the
+" left/right; dp in a side pane pushes its hunk to the middle.  Resolve by
+" editing the middle buffer and writing it: jj snapshots the working copy
+" on its next invocation and considers marker-free files resolved.
+function! s:MergeSplit(mods) abort
+  let root = s:Root()
+  let path = s:BufPath(root)
+  let rev = s:BufRev(root)
+  " Wipe panes left over from a previous merge view of this buffer.
+  let middlenr = bufnr('')
+  for buf in range(1, bufnr('$'))
+    if bufexists(buf) && getbufvar(buf, 'jj_merge_origin', -1) == middlenr
+      exe 'silent! bwipeout! ' . buf
+    endif
+  endfor
+  " Materialize with git-style markers so the sides can be reconstructed.
+  " No --ignore-working-copy when rev is @: the snapshot makes jj re-parse
+  " any partial resolution already sitting in the file on disk.
+  let [lines, status] = s:JJContent(root, ['file', 'show', '-r', rev,
+        \ '--config', 'ui.conflict-marker-style=git', '--', s:Fileset(path)],
+        \ rev !=# '@')
+  if status
+    call s:throw(join(lines, ' '))
+  endif
+  let conflict = s:ParseGitMarkers(lines)
+  if !conflict.conflicted
+    call s:throw('no conflict in ' . path . ' at ' . rev)
+  endif
+  if conflict.multiway
+    call s:throw('conflict has more than two sides; use jj resolve, or '
+          \ . 'edit the conflict markers directly')
+  endif
+
+  let middle = win_getid()
+  diffthis
+  let side1nr = s:MergePane(root, path, 'leftabove', 1, conflict.side1)
+  let side2nr = s:MergePane(root, path, 'rightbelow', 2, conflict.side2)
+  exe 'nnoremap <buffer> <silent> d2o :diffget ' . side1nr . '<Bar>diffupdate<CR>'
+  exe 'nnoremap <buffer> <silent> d3o :diffget ' . side2nr . '<Bar>diffupdate<CR>'
+  " Wire up cleanup: when the last side pane goes away, take the middle
+  " window out of diff mode.
+  augroup jj_merge
+    exe 'autocmd! BufWinLeave <buffer=' . side1nr . '> ++once '
+          \ . 'call s:MergePaneClosed(' . middle . ', ' . side2nr . ')'
+    exe 'autocmd! BufWinLeave <buffer=' . side2nr . '> ++once '
+          \ . 'call s:MergePaneClosed(' . middle . ', ' . side1nr . ')'
+  augroup END
+  echo 'side #1 (d2o): ' . conflict.label1 . ' | side #2 (d3o): ' . conflict.label2
+  return ''
+endfunction
+
+" Create one read-only side pane and return its buffer number; leaves the
+" middle window focused.
+function! s:MergePane(root, path, where, side, lines) abort
+  let middle = win_getid()
+  let middlenr = bufnr('')
+  exe 'silent keepalt ' . a:where . ' vertical new'
+  setlocal buftype=nofile bufhidden=wipe noswapfile
+  silent! exe 'file ' . fnameescape('jjconflict://' . a:side . '/' . a:path)
+  call setline(1, a:lines)
+  setlocal nomodified nomodifiable readonly
+  exe 'doautocmd filetypedetect BufRead ' . fnameescape(a:root . '/' . a:path)
+  let b:jj_root = a:root
+  let b:jj_merge_origin = middlenr
+  exe 'nnoremap <buffer> <silent> dp :diffput ' . middlenr . '<Bar>diffupdate<CR>'
+  nnoremap <buffer> <silent> q :close<CR>
+  diffthis
+  let nr = bufnr('')
+  call win_gotoid(middle)
+  return nr
+endfunction
+
+function! s:MergePaneClosed(middle, other) abort
+  if bufwinnr(a:other) < 0 && win_id2win(a:middle)
+    call win_execute(a:middle, 'diffoff')
   endif
 endfunction
 
@@ -439,6 +584,31 @@ function! s:BlameJump(cmd) abort
   endif
 endfunction
 
+" Section: hunk navigation
+"
+" Like fugitive, ]c and [c jump between @@ hunk headers in plugin buffers
+" that show patches (:J diff, :J show, commit object buffers).  In diff
+" and merge views these maps are not installed, so Vim's native diff-mode
+" ]c/[c apply there, also like fugitive.
+
+function! s:NextHunk(count) abort
+  for i in range(a:count)
+    call search('^@@', 'W')
+  endfor
+endfunction
+
+function! s:PrevHunk(count) abort
+  normal! 0
+  for i in range(a:count)
+    call search('^@@', 'Wb')
+  endfor
+endfunction
+
+function! s:MapHunkNav() abort
+  nnoremap <buffer> <silent> ]c :<C-U>call <SID>NextHunk(v:count1)<CR>
+  nnoremap <buffer> <silent> [c :<C-U>call <SID>PrevHunk(v:count1)<CR>
+endfunction
+
 " Section: command output buffers (:J st, :J log, :J diff, ...)
 
 function! s:Output(mods, args, filetype) abort
@@ -460,6 +630,7 @@ function! s:Output(mods, args, filetype) abort
   endif
   nnoremap <buffer> <silent> q :close<CR>
   nnoremap <buffer> <silent> R :call <SID>OutputRefresh()<CR>
+  call s:MapHunkNav()
   if status
     echohl WarningMsg | echomsg 'jj exited with an error' | echohl NONE
   endif
@@ -491,8 +662,8 @@ function! jj#Command(bang, mods, arg) abort
       return s:Output(a:mods, ['status'], '')
     elseif sub ==# 'blame' || sub ==# 'annotate'
       return s:Blame(a:mods, rest)
-    elseif sub ==# 'diffsplit'
-      return s:DiffSplit(a:mods, join(rest, ' '))
+    elseif sub ==# 'diffsplit' || sub ==# 'diffsplit!'
+      return s:DiffSplit(a:mods, join(rest, ' '), a:bang || sub =~# '!$')
     elseif sub =~# '^\%(edit\|split\|vsplit\|tabedit\|pedit\)$'
       return s:EditCommand(sub, a:mods, join(rest, ' '))
     elseif sub ==# 'diff'
@@ -514,7 +685,7 @@ function! jj#Complete(arglead, cmdline, cursorpos) abort
   let subcommands = ['blame', 'diff', 'diffsplit', 'edit', 'split', 'vsplit',
         \ 'tabedit', 'pedit', 'status', 'log', 'show', 'describe', 'new',
         \ 'commit', 'squash', 'abandon', 'bookmark', 'rebase', 'restore',
-        \ 'undo', 'op', 'workspace', 'file', 'evolog', 'absorb']
+        \ 'resolve', 'undo', 'op', 'workspace', 'file', 'evolog', 'absorb']
   let lead = matchstr(a:cmdline, '^\s*\a\+!\=\s\+\zs.*')
   if lead !~# '\s'
     return filter(subcommands, 'strpart(v:val, 0, len(a:arglead)) ==# a:arglead')
