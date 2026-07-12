@@ -27,11 +27,19 @@ COMMANDS                                        *jj-commands*
 :J {args}               Any subcommand not listed below is passed straight
                         through to jj, and its output is shown in a scratch
                         window, e.g. `:J log`, `:J op log`, `:J new`.
-                        In output windows, `q` closes the window and `R`
-                        re-runs the command.  Commands that would open an
+                        Output is rendered with jj's own terminal colors
+                        (see |jj-colors|).  Commands that would open an
                         editor should be given `-m` style flags instead
                         (e.g. `:J describe -m message`).  Escape spaces in
                         arguments with a backslash: `:J describe -m two\ words`
+
+                        Maps inside output windows:
+                          q       close the window
+                          R       re-run the command and refresh
+                          <CR>    open the commit whose change id appears
+                                  on the current line (great in :J log)
+                          o       ... in a horizontal split
+                          O       ... in a new tab
 
                                                 *:J-blame*
 :J blame                Analogous to fugitive's :Git blame.  Run
@@ -150,6 +158,9 @@ syntax but with jj revsets:
 If the whole argument parses as a revset it is treated as one, so revsets
 containing colons still work without quoting.
 
+Object arguments complete on the command line: bookmarks plus common
+revsets (@, @-, root(), trunk(), ...).
+
                                                 *jj-object-buffer*
 Object buffers have names like
     jj://{root}//{commitid}/{path}
@@ -160,10 +171,42 @@ Revsets are resolved to full commit ids before the buffer is created.
 buffer, interpreted relative to that buffer's revision.
 
 ==============================================================================
+COLORS                                          *jj-colors*
+
+jj's terminal output is colorful, and vim-jj keeps it that way: output
+windows (:J, :J log, :J op log, ...) run jj with --color=always, strip the
+ANSI escape codes, and re-apply them as text properties (Vim 8.2+) or
+extmarks (Neovim).  The log graph, bookmark names, timestamps, and jj's
+bold shortest-unique-prefix change ids all render exactly as in the
+terminal.  Your jj color configuration (in jj's own config.toml) is
+respected, since the colors come from jj itself.  Highlight groups are
+generated on demand and named jjAnsi_*; set g:jj_color = 0 to disable and
+get plain text.
+
+:J blame gives each change id a stable rotating color (like fugitive's
+hash colors); these groups are named jjBlameId_{changeid}.
+
+==============================================================================
+STATUSLINE                                      *jj-statusline* *jj#Statusline()*
+
+Add the working-copy change id to your statusline: >
+        set statusline+=%{jj#Statusline()}
+<
+It renders like `[jj:tuxqvyvp+]`: the shortest change id of @, with "!"
+appended if @ has conflicts and "+" if it is non-empty.  The value is
+cached for a few seconds per workspace and computed with
+--ignore-working-copy, so it never snapshots, blocks, or takes the
+workspace lock; any :J command invalidates the cache immediately.
+
+==============================================================================
 CONFIGURATION                                   *jj-configuration*
 
 g:jj_executable                                 *g:jj_executable*
         Name or path of the jj binary.  Default: "jj"
+
+g:jj_color                                      *g:jj_color*
+        Set to 0 to disable ANSI color rendering in output windows.
+        Default: 1
 
 g:jj_blame_template                             *g:jj_blame_template*
         jj template used for each annotation line in :J blame.  It should

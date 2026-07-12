@@ -25,6 +25,26 @@ fugitive | vim-jj | what it does
 `:Gsplit` etc. | `:J split` / `:J vsplit` / `:J tabedit` / `:J pedit` | same, in a split/tab/preview window
 `:Git <anything>` | `:J <anything>` | any other subcommand is passed through to jj and its output shown in a scratch window: `:J`, (= `jj status`), `:J log`, `:J new`, `:J describe -m msg`, `:J op log`, ...
 
+## Pretty things
+
+- **jj's colors, in Vim.** Output windows run jj with `--color=always` and
+  re-render the ANSI codes as Vim text properties (extmarks on Neovim), so
+  `:J log` looks exactly like the terminal: the colored graph, bookmarks,
+  timestamps, and jj's bold shortest-unique-prefix change ids — including
+  whatever custom colors you've set in jj's own config. `let g:jj_color = 0`
+  for plain text.
+- **Navigable log/status.** In any output window, `<CR>` opens the commit
+  whose change id is on the current line (`o` for a split, `O` for a tab,
+  `R` refreshes, `q` closes). `:J log`, hit `<CR>` on a commit, `]c` through
+  its hunks.
+- **Colorful blame.** Each change id in `:J blame` gets a stable rotating
+  color, fugitive-style.
+- **Statusline.** `set statusline+=%{jj#Statusline()}` shows e.g.
+  `[jj:tuxqvyvp+]` — the working-copy change id, `!` if conflicted, `+` if
+  non-empty. Cached and lock-free (`--ignore-working-copy`).
+- **Completion.** `:J edit <Tab>` completes bookmarks and common revsets;
+  the first argument completes subcommand names.
+
 Like fugitive, blame/diffsplit/edit compose: from a buffer showing a file
 at an old revision, `:J blame` annotates as of that revision, `:J
 diffsplit` diffs against that revision's parent, and `:J edit` (no

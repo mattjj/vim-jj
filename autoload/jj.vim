@@ -85,8 +85,9 @@ endfunction
 
 " Section: running jj
 
-function! s:Argv(root, args, ignore_wc) abort
-  let argv = [s:Executable(), '--repository', a:root, '--no-pager', '--color', 'never']
+function! s:Argv(root, args, ignore_wc, color) abort
+  let argv = [s:Executable(), '--repository', a:root, '--no-pager',
+        \ '--color', a:color ? 'always' : 'never']
   if a:ignore_wc
     call add(argv, '--ignore-working-copy')
   endif
@@ -95,7 +96,7 @@ endfunction
 
 " Run jj with stdout and stderr merged; returns [lines, exit_status].
 function! s:JJ(root, args, ...) abort
-  let argv = s:Argv(a:root, a:args, a:0 && a:1)
+  let argv = s:Argv(a:root, a:args, a:0 && a:1, a:0 > 1 && a:2)
   let cmd = join(map(copy(argv), 'shellescape(v:val)'), ' ') . ' 2>&1'
   let lines = systemlist(cmd)
   return [lines, v:shell_error]
@@ -104,7 +105,7 @@ endfunction
 " Run jj keeping stdout pristine (for file contents); stderr is captured
 " separately and returned as the error message on failure.
 function! s:JJContent(root, args, ...) abort
-  let argv = s:Argv(a:root, a:args, a:0 && a:1)
+  let argv = s:Argv(a:root, a:args, a:0 && a:1, 0)
   let errfile = tempname()
   let cmd = join(map(copy(argv), 'shellescape(v:val)'), ' ') . ' 2>' . shellescape(errfile)
   let lines = systemlist(cmd)
@@ -525,6 +526,7 @@ function! s:Blame(mods, args) abort
   setlocal scrollbind nowrap nofoldenable nonumber norelativenumber
   setlocal foldcolumn=0 signcolumn=no winfixwidth cursorline
   setlocal filetype=jjblame
+  call s:BlameColors(lines)
   let b:jj_root = root
   let b:jj_blame = {'origin': origin, 'restore': restore, 'path': path}
   exe top
@@ -540,6 +542,31 @@ function! s:Blame(mods, args) abort
     exe 'autocmd! BufWinLeave <buffer=' . bufnr('') . '> ++once call s:BlameRestore(getbufvar(str2nr(expand("<abuf>")), "jj_blame", {}))'
   augroup END
   return ''
+endfunction
+
+" Give each change id in the blame column a stable color, like fugitive's
+" rotating hash colors (and jj's own colored output).
+let s:blame_cterm = [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14]
+
+function! s:BlameColors(lines) abort
+  let seen = {}
+  for line in a:lines
+    let id = matchstr(line, '^[k-z]\+\ze\%(\s\|$\)')
+    if empty(id) || has_key(seen, id)
+      continue
+    endif
+    let seen[id] = 1
+    let n = 0
+    for i in range(len(id))
+      let n += char2nr(id[i])
+    endfor
+    let cterm = s:blame_cterm[n % len(s:blame_cterm)]
+    let group = 'jjBlameId_' . id
+    if !hlexists(group)
+      exe 'hi def ' . group . ' ctermfg=' . cterm . ' guifg=' . s:XtermHex(cterm)
+    endif
+    exe 'syn match ' . group . ' /^' . id . '\>/ nextgroup=jjblameAuthor skipwhite'
+  endfor
 endfunction
 
 function! s:BlameRestore(blame) abort
@@ -584,6 +611,161 @@ function! s:BlameJump(cmd) abort
   endif
 endfunction
 
+" Section: ANSI color rendering
+"
+" jj's terminal output is beautiful; keep it that way.  Output buffers run
+" jj with --color always, then the SGR escape codes are stripped and
+" re-applied as text properties (Vim) or extmarks (Neovim), with highlight
+" groups generated on demand from the xterm-256 palette.  This preserves
+" the log graph coloring and jj's bold shortest-unique-prefix change ids.
+
+let s:ansi16 = ['#000000', '#cd0000', '#00cd00', '#cdcd00', '#0000ee',
+      \ '#cd00cd', '#00cdcd', '#e5e5e5', '#7f7f7f', '#ff0000', '#00ff00',
+      \ '#ffff00', '#5c5cff', '#ff00ff', '#00ffff', '#ffffff']
+
+function! s:XtermHex(n) abort
+  if a:n < 16
+    return s:ansi16[a:n]
+  elseif a:n < 232
+    let n = a:n - 16
+    let steps = [0, 95, 135, 175, 215, 255]
+    return printf('#%02x%02x%02x', steps[n / 36], steps[(n / 6) % 6], steps[n % 6])
+  else
+    let gray = 8 + 10 * (a:n - 232)
+    return printf('#%02x%02x%02x', gray, gray, gray)
+  endif
+endfunction
+
+function! s:AnsiSupported() abort
+  return get(g:, 'jj_color', 1)
+        \ && (exists('*prop_type_add') || exists('*nvim_buf_add_highlight'))
+endfunction
+
+let s:ansi_groups = {}
+
+function! s:AnsiGroup(state) abort
+  let key = a:state.fg . '_' . a:state.bg
+        \ . (a:state.bold ? 'b' : '') . (a:state.underline ? 'u' : '')
+  if has_key(s:ansi_groups, key)
+    return s:ansi_groups[key]
+  endif
+  let name = 'jjAnsi_' . substitute(key, '-', 'd', 'g')
+  let cmd = 'hi def ' . name
+  if a:state.fg >= 0
+    let cmd .= ' ctermfg=' . a:state.fg . ' guifg=' . s:XtermHex(a:state.fg)
+  endif
+  if a:state.bg >= 0
+    let cmd .= ' ctermbg=' . a:state.bg . ' guibg=' . s:XtermHex(a:state.bg)
+  endif
+  let attrs = (a:state.bold ? 'bold,' : '') . (a:state.underline ? 'underline,' : '')
+  if !empty(attrs)
+    let cmd .= ' cterm=' . attrs[:-2] . ' gui=' . attrs[:-2]
+  endif
+  exe cmd
+  if exists('*prop_type_add') && empty(prop_type_get(name))
+    call prop_type_add(name, {'highlight': name})
+  endif
+  let s:ansi_groups[key] = name
+  return name
+endfunction
+
+function! s:AnsiApplySGR(state, params) abort
+  let ps = map(split(a:params, ';', 1), 'str2nr(v:val)')
+  if empty(ps)
+    let ps = [0]
+  endif
+  let i = 0
+  while i < len(ps)
+    let p = ps[i]
+    if p == 0
+      call extend(a:state, {'fg': -1, 'bg': -1, 'bold': 0, 'underline': 0})
+    elseif p == 1
+      let a:state.bold = 1
+    elseif p == 4
+      let a:state.underline = 1
+    elseif p == 22
+      let a:state.bold = 0
+    elseif p == 24
+      let a:state.underline = 0
+    elseif p >= 30 && p <= 37
+      let a:state.fg = p - 30
+    elseif p == 39
+      let a:state.fg = -1
+    elseif p >= 90 && p <= 97
+      let a:state.fg = p - 82
+    elseif p >= 40 && p <= 47
+      let a:state.bg = p - 40
+    elseif p == 49
+      let a:state.bg = -1
+    elseif p >= 100 && p <= 107
+      let a:state.bg = p - 92
+    elseif p == 38 || p == 48
+      if get(ps, i + 1) == 5
+        let a:state[p == 38 ? 'fg' : 'bg'] = get(ps, i + 2, -1)
+        let i += 2
+      elseif get(ps, i + 1) == 2
+        " 24-bit color: not emitted by jj's default config; skip the args
+        let i += 4
+      endif
+    endif
+    let i += 1
+  endwhile
+endfunction
+
+" Strip ANSI escapes from lines; returns [clean_lines, highlights] where
+" each highlight is [lnum, byte_col, byte_length, group].
+function! s:AnsiRender(lines) abort
+  let state = {'fg': -1, 'bg': -1, 'bold': 0, 'underline': 0}
+  let clean_lines = []
+  let hls = []
+  let lnum = 0
+  for line in a:lines
+    let lnum += 1
+    let clean = ''
+    let pos = 0
+    while pos < len(line)
+      let [esc, start, end] = matchstrpos(line, "\e\\[[0-9;]*[ -/]*[@-~]", pos)
+      if start < 0
+        let chunk = strpart(line, pos)
+        let pos = len(line)
+      else
+        let chunk = strpart(line, pos, start - pos)
+        let pos = end
+      endif
+      if !empty(chunk)
+        if state.fg >= 0 || state.bg >= 0 || state.bold || state.underline
+          call add(hls, [lnum, len(clean) + 1, len(chunk), s:AnsiGroup(state)])
+        endif
+        let clean .= chunk
+      endif
+      if start >= 0 && esc[-1:] ==# 'm'
+        call s:AnsiApplySGR(state, matchstr(esc, '^\e\[\zs[0-9;]*'))
+      endif
+    endwhile
+    call add(clean_lines, clean)
+  endfor
+  return [clean_lines, hls]
+endfunction
+
+function! s:AnsiNs() abort
+  if !exists('s:ansi_ns')
+    let s:ansi_ns = nvim_create_namespace('jj_ansi')
+  endif
+  return s:ansi_ns
+endfunction
+
+function! s:AnsiHighlight(hls) abort
+  if exists('*prop_add')
+    for [lnum, col, length, group] in a:hls
+      call prop_add(lnum, col, {'length': length, 'type': group})
+    endfor
+  elseif exists('*nvim_buf_add_highlight')
+    for [lnum, col, length, group] in a:hls
+      call nvim_buf_add_highlight(0, s:AnsiNs(), group, lnum - 1, col - 1, col - 1 + length)
+    endfor
+  endif
+endfunction
+
 " Section: hunk navigation
 "
 " Like fugitive, ]c and [c jump between @@ hunk headers in plugin buffers
@@ -611,49 +793,119 @@ endfunction
 
 " Section: command output buffers (:J st, :J log, :J diff, ...)
 
+function! s:OutputFill(lines, color) abort
+  setlocal modifiable noreadonly
+  if exists('*nvim_buf_clear_namespace')
+    call nvim_buf_clear_namespace(0, s:AnsiNs(), 0, -1)
+  endif
+  silent keepjumps %delete _
+  if a:color
+    let [clean, hls] = s:AnsiRender(a:lines)
+    call setline(1, empty(clean) ? ['(no output)'] : clean)
+    call s:AnsiHighlight(hls)
+  else
+    call setline(1, empty(a:lines) ? ['(no output)'] : a:lines)
+  endif
+  setlocal nomodified nomodifiable readonly
+endfunction
+
 function! s:Output(mods, args, filetype) abort
   let root = s:Root()
-  let [lines, status] = s:JJ(root, a:args)
+  " Buffers with a filetype get Vim syntax highlighting; everything else
+  " gets jj's own colors.
+  let color = empty(a:filetype) && s:AnsiSupported()
+  let [lines, status] = s:JJ(root, a:args, 0, color)
   if status && empty(lines)
     call s:throw('command failed: jj ' . join(a:args, ' '))
   endif
   let mods = empty(s:Mods(a:mods)) ? 'botright ' : s:Mods(a:mods)
   exe 'silent keepalt ' . mods . 'new'
-  setlocal buftype=nofile bufhidden=wipe noswapfile
+  setlocal buftype=nofile bufhidden=wipe noswapfile nowrap
   silent! exe 'file ' . fnameescape('jj-out://' . join(a:args, ' '))
-  call setline(1, empty(lines) ? ['(no output)'] : lines)
-  setlocal nomodified nomodifiable readonly nowrap
   let b:jj_root = root
   let b:jj_args = a:args
+  let b:jj_color = color
+  call s:OutputFill(lines, color)
   if !empty(a:filetype)
     let &l:filetype = a:filetype
   endif
   nnoremap <buffer> <silent> q :close<CR>
   nnoremap <buffer> <silent> R :call <SID>OutputRefresh()<CR>
+  nnoremap <buffer> <silent> <CR> :<C-U>call <SID>OutputOpen('edit')<CR>
+  nnoremap <buffer> <silent> o :<C-U>call <SID>OutputOpen('split')<CR>
+  nnoremap <buffer> <silent> O :<C-U>call <SID>OutputOpen('tabedit')<CR>
   call s:MapHunkNav()
   if status
     echohl WarningMsg | echomsg 'jj exited with an error' | echohl NONE
   endif
   " Shrink the window if the output is short.
-  if len(lines) < winheight(0) && a:mods !~# 'vert'
-    exe 'resize ' . max([len(lines), 1])
+  if line('$') < winheight(0) && a:mods !~# 'vert'
+    exe 'resize ' . max([line('$'), 1])
   endif
   return ''
 endfunction
 
 function! s:OutputRefresh() abort
-  let [lines, status] = s:JJ(b:jj_root, b:jj_args)
-  setlocal modifiable noreadonly
-  silent keepjumps %delete _
-  call setline(1, empty(lines) ? ['(no output)'] : lines)
-  setlocal nomodified nomodifiable readonly
+  let [lines, status] = s:JJ(b:jj_root, b:jj_args, 0, get(b:, 'jj_color', 0))
+  call s:OutputFill(lines, get(b:, 'jj_color', 0))
+endfunction
+
+" Open the commit whose change id (or commit id) appears on the current
+" line, e.g. from :J log or :J status output.
+function! s:OutputOpen(cmd) abort
+  let line = getline('.')
+  let token = matchstr(line, '\<[k-z]\{8,}\>')
+  if empty(token)
+    let token = matchstr(line, '\<[k-z]\{4,}\>')
+  endif
+  if empty(token)
+    let token = matchstr(line, '\<\x\{6,}\>')
+  endif
+  if empty(token)
+    echo 'jj: no revision found on this line'
+    return
+  endif
+  try
+    let cid = s:ResolveRev(b:jj_root, token)
+  catch /^jj:/
+    echohl ErrorMsg | echomsg v:exception | echohl NONE
+    return
+  endtry
+  exe a:cmd . ' ' . fnameescape(s:Url(b:jj_root, cid, ''))
 endfunction
 
 let s:diff_format_flags = '^\%(-s\|--summary\|--stat\|--types\|--git\|--color-words\|--name-only\|--tool\|-t\)'
 
+" Section: statusline
+
+let s:statusline_cache = {}
+
+" Statusline component: shortest change id of @, with markers for conflict
+" (!) and empty (+).  Cached for a few seconds per workspace; runs with
+" --ignore-working-copy so it never snapshots or takes the workspace lock.
+" Usage: set statusline+=%{jj#Statusline()}
+function! jj#Statusline() abort
+  let root = jj#Root()
+  if empty(root)
+    return ''
+  endif
+  let now = localtime()
+  let cached = get(s:statusline_cache, root, [])
+  if len(cached) == 2 && now - cached[0] < 10
+    return cached[1]
+  endif
+  let [out, status] = s:JJ(root, ['log', '--no-graph', '-r', '@', '-T',
+        \ 'change_id.shortest(8) ++ if(conflict, "!", "") ++ if(empty, "", "+")'], 1)
+  let str = status || empty(out) ? '' : '[jj:' . out[0] . ']'
+  let s:statusline_cache[root] = [now, str]
+  return str
+endfunction
+
 " Section: :J dispatcher
 
 function! jj#Command(bang, mods, arg) abort
+  " Any :J command may change the repo; don't serve stale statuslines.
+  let s:statusline_cache = {}
   try
     let args = s:ArgSplit(a:arg)
     let sub = get(args, 0, '')
@@ -681,14 +933,32 @@ function! jj#Command(bang, mods, arg) abort
   endtry
 endfunction
 
+function! s:CompleteRevset(arglead) abort
+  try
+    let root = s:Root()
+  catch /^jj:/
+    return []
+  endtry
+  let candidates = ['@', '@-', '@--', 'root()', 'trunk()']
+  let [out, status] = s:JJ(root, ['bookmark', 'list', '-T', 'name ++ "\n"'], 1)
+  if !status
+    let candidates += filter(out, '!empty(v:val)')
+  endif
+  return filter(candidates, 'strpart(v:val, 0, len(a:arglead)) ==# a:arglead')
+endfunction
+
 function! jj#Complete(arglead, cmdline, cursorpos) abort
   let subcommands = ['blame', 'diff', 'diffsplit', 'edit', 'split', 'vsplit',
         \ 'tabedit', 'pedit', 'status', 'log', 'show', 'describe', 'new',
         \ 'commit', 'squash', 'abandon', 'bookmark', 'rebase', 'restore',
         \ 'resolve', 'undo', 'op', 'workspace', 'file', 'evolog', 'absorb']
-  let lead = matchstr(a:cmdline, '^\s*\a\+!\=\s\+\zs.*')
-  if lead !~# '\s'
+  let sub = matchlist(a:cmdline, '^\s*\a\+!\=\s\+\(\S\+\)\s')
+  if empty(sub)
     return filter(subcommands, 'strpart(v:val, 0, len(a:arglead)) ==# a:arglead')
+  endif
+  if index(['edit', 'split', 'vsplit', 'tabedit', 'pedit', 'diffsplit',
+        \ 'show', 'new', 'rebase'], substitute(sub[1], '!$', '', '')) >= 0
+    return s:CompleteRevset(a:arglead)
   endif
   return []
 endfunction
