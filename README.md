@@ -109,6 +109,10 @@ let g:jj_blame_template = '...' " jj template for blame annotation lines
   instead (`:J describe -m message`).
 - `:J blame` requires the buffer to be written first (jj snapshots the
   working copy when it runs, so the file on disk is what gets annotated).
+- `jj file annotate` can be slow on files with deep history (it's much
+  younger than `git blame`). vim-jj compensates: blame runs as an async
+  job (the pane opens instantly and fills in), and results are cached per
+  commit, so re-blaming an unchanged file is instant.
 - No `:Gwrite`/staging analogue — jj doesn't have an index, so a good
   chunk of fugitive has no jj counterpart anyway.
 

@@ -479,6 +479,14 @@ function! s:MergePaneClosed(middle, other) abort
 endfunction
 
 " Section: :J blame
+"
+" jj file annotate can take a while on files with deep history, so blame
+" is asynchronous by default: the pane opens immediately and fills in when
+" jj finishes.  Results are also cached: annotate output is a pure
+" function of (commit id, path, template), so @ is resolved to a commit id
+" first - which snapshots the working copy, making the cache key track
+" file edits automatically - and the annotate job itself then runs with
+" --ignore-working-copy.
 
 let s:blame_template =
       \ 'separate(" ",'
@@ -487,6 +495,8 @@ let s:blame_template =
       \ . ' commit.author().timestamp().local().format("%Y-%m-%d %H:%M"),'
       \ . ' pad_start(4, line_number)'
       \ . ') ++ "\n"'
+
+let s:annotate_cache = {'order': [], 'data': {}}
 
 function! s:Blame(mods, args) abort
   let root = s:Root()
@@ -509,16 +519,42 @@ function! s:Blame(mods, args) abort
   let path = s:BufPath(root)
   let rev = s:BufRev(root)
   let template = get(g:, 'jj_blame_template', s:blame_template)
-  let cmd = ['file', 'annotate', '-r', rev, '-T', template] + a:args
-        \ + ['--', root . '/' . path]
-  " Annotating @ snapshots the working copy first, so the on-disk file (which
-  " we just verified matches the buffer) is exactly what gets annotated.
-  let [lines, status] = s:JJContent(root, cmd, rev !=# '@')
-  if status
-    call s:throw(join(lines, ' '))
-  endif
-  let width = max(map(copy(lines), 'strdisplaywidth(v:val)')) + 1
 
+  let cachable = empty(a:args)
+  if cachable
+    let cid = s:ResolveRev(root, rev)
+    let key = join([root, cid, path, template], "\n")
+    if has_key(s:annotate_cache.data, key)
+      call s:BlameOpen(root, path, s:annotate_cache.data[key], 0)
+      return ''
+    endif
+    let cmd = ['file', 'annotate', '-r', cid, '-T', template,
+          \ '--', root . '/' . path]
+    let ignore_wc = 1
+  else
+    let key = ''
+    let cmd = ['file', 'annotate', '-r', rev, '-T', template] + a:args
+          \ + ['--', root . '/' . path]
+    let ignore_wc = rev !=# '@'
+  endif
+
+  if get(g:, 'jj_blame_async', 1) && (exists('*job_start') || exists('*jobstart'))
+    let bufnr = s:BlameOpen(root, path, ['annotating...'], 1)
+    call s:BlameStartJob(s:Argv(root, cmd, ignore_wc, 0), bufnr, key)
+  else
+    let [lines, status] = s:JJContent(root, cmd, ignore_wc)
+    if status
+      call s:throw(join(lines, ' '))
+    endif
+    call s:BlameCacheStore(key, lines)
+    call s:BlameOpen(root, path, lines, 0)
+  endif
+  return ''
+endfunction
+
+" Create the blame window (fugitive-style scroll-bound left vsplit) and
+" fill it; with pending set, it shows a placeholder until the job lands.
+function! s:BlameOpen(root, path, lines, pending) abort
   " Configure the origin window like fugitive does, remembering what to
   " restore when the blame window goes away.
   let origin = win_getid()
@@ -527,24 +563,16 @@ function! s:Blame(mods, args) abort
         \ . (&l:wrap ? ' wrap' : '')
         \ . (&l:foldenable ? ' foldenable' : '')
   setlocal scrollbind nowrap nofoldenable
-  let top = line('w0') + &scrolloff
-  let current = line('.')
 
-  exe 'silent keepalt leftabove vertical ' . width . ' new'
+  exe 'silent keepalt leftabove vertical 40 new'
   setlocal buftype=nofile bufhidden=wipe noswapfile nomodified
-  silent! exe 'file ' . fnameescape('jj-blame://' . path)
-  call setline(1, lines)
-  setlocal nomodified nomodifiable readonly
-  setlocal scrollbind nowrap nofoldenable nonumber norelativenumber
+  silent! exe 'file ' . fnameescape('jj-blame://' . a:path)
+  setlocal nowrap nofoldenable nonumber norelativenumber
   setlocal foldcolumn=0 signcolumn=no winfixwidth cursorline
   setlocal filetype=jjblame
-  call s:BlameColors(lines)
-  let b:jj_root = root
-  let b:jj_blame = {'origin': origin, 'restore': restore, 'path': path}
-  exe top
-  normal! zt
-  exe current
-  syncbind
+  let b:jj_root = a:root
+  let b:jj_blame = {'origin': origin, 'restore': restore, 'path': a:path,
+        \ 'pending': a:pending}
 
   nnoremap <buffer> <silent> q :close<CR>
   nnoremap <buffer> <silent> <CR> :call <SID>BlameJump('')<CR>
@@ -554,7 +582,124 @@ function! s:Blame(mods, args) abort
   augroup jj_blame
     exe 'autocmd! BufWinLeave <buffer=' . bufnr('') . '> ++once call s:BlameRestore(getbufvar(str2nr(expand("<abuf>")), "jj_blame", {}))'
   augroup END
-  return ''
+  call s:BlameFillHere(a:lines, a:pending)
+  return bufnr('')
+endfunction
+
+" Fill the current (blame) window; runs at creation and again when an
+" async annotate job completes.
+function! s:BlameFillHere(lines, pending) abort
+  setlocal modifiable noreadonly
+  silent keepjumps %delete _
+  call setline(1, a:lines)
+  setlocal nomodified nomodifiable readonly
+  let b:jj_blame.pending = a:pending
+  if a:pending
+    return
+  endif
+  call s:BlameColors(a:lines)
+  exe 'vertical resize '
+        \ . (max(map(copy(a:lines), 'strdisplaywidth(v:val)')) + 1)
+  " Align the viewport with the origin window, then bind scrolling.
+  let origin = b:jj_blame.origin
+  if win_id2win(origin)
+    exe min([line('w0', origin) + getwinvar(origin, '&scrolloff'), line('$')])
+    normal! zt
+    exe min([line('.', origin), line('$')])
+  endif
+  setlocal scrollbind
+  syncbind
+endfunction
+
+function! s:BlameCacheStore(key, lines) abort
+  if empty(a:key)
+    return
+  endif
+  if !has_key(s:annotate_cache.data, a:key)
+    call add(s:annotate_cache.order, a:key)
+    if len(s:annotate_cache.order) > 20
+      call remove(s:annotate_cache.data, remove(s:annotate_cache.order, 0))
+    endif
+  endif
+  let s:annotate_cache.data[a:key] = a:lines
+endfunction
+
+function! s:BlameStartJob(argv, bufnr, key) abort
+  let ctx = {'out': [], 'err': [], 'bufnr': a:bufnr, 'key': a:key,
+        \ 'closed': 0, 'status': -1}
+  if exists('*job_start')
+    " Vim: out/err arrive line-wise; close_cb and exit_cb can come in
+    " either order, so finish only once we have both.
+    call job_start(a:argv, {
+          \ 'out_cb': {ch, msg -> add(ctx.out, msg)},
+          \ 'err_cb': {ch, msg -> add(ctx.err, msg)},
+          \ 'close_cb': function('s:BlameJobClose', [ctx]),
+          \ 'exit_cb': function('s:BlameJobExit', [ctx])})
+  else
+    call jobstart(a:argv, {
+          \ 'stdout_buffered': v:true,
+          \ 'stderr_buffered': v:true,
+          \ 'on_stdout': {id, data, ev -> extend(ctx.out, data)},
+          \ 'on_stderr': {id, data, ev -> extend(ctx.err, data)},
+          \ 'on_exit': {id, status, ev -> s:BlameJobDone(ctx, status)}})
+  endif
+endfunction
+
+function! s:BlameJobClose(ctx, channel) abort
+  let a:ctx.closed = 1
+  if a:ctx.status >= 0
+    call s:BlameJobDone(a:ctx, a:ctx.status)
+  endif
+endfunction
+
+function! s:BlameJobExit(ctx, job, status) abort
+  let a:ctx.status = a:status
+  if a:ctx.closed
+    call s:BlameJobDone(a:ctx, a:status)
+  endif
+endfunction
+
+function! s:BlameJobDone(ctx, status) abort
+  let lines = a:ctx.out
+  while !empty(lines) && lines[-1] ==# ''
+    call remove(lines, -1)
+  endwhile
+  if !bufexists(a:ctx.bufnr)
+    return
+  endif
+  let wins = win_findbuf(a:ctx.bufnr)
+  if empty(wins)
+    return
+  endif
+  if a:status != 0
+    let s:blame_fill = ['jj file annotate failed:']
+          \ + filter(a:ctx.err + lines, '!empty(v:val)')
+    echohl WarningMsg | echomsg 'jj: blame failed' | echohl NONE
+  else
+    call s:BlameCacheStore(a:ctx.key, lines)
+    let s:blame_fill = lines
+  endif
+  call win_execute(wins[0], 'call s:BlameFillHere(s:blame_fill, 0)')
+endfunction
+
+" Wait for a pending blame to fill in (up to {timeout} seconds, default
+" 15); mostly useful for scripting and tests.  Returns 1 when nothing is
+" pending anymore.
+function! jj#BlameWait(...) abort
+  let deadline = localtime() + (a:0 ? a:1 : 15)
+  while localtime() <= deadline
+    let pending = 0
+    for winnr in range(1, winnr('$'))
+      if get(getbufvar(winbufnr(winnr), 'jj_blame', {}), 'pending', 0)
+        let pending = 1
+      endif
+    endfor
+    if !pending
+      return 1
+    endif
+    sleep 20m
+  endwhile
+  return 0
 endfunction
 
 " Give each change id in the blame column a stable color, like fugitive's

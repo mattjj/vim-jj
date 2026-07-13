@@ -47,7 +47,13 @@ COMMANDS                                        *jj-commands*
 :J blame                Analogous to fugitive's :Git blame.  Run
                         `jj file annotate` on the current file and show the
                         annotations in a scroll-bound vertical split to the
-                        left.  In a |jj-object-buffer| for a file at an old
+                        left.  Annotation runs asynchronously (jj can take
+                        a while on files with deep history): the pane
+                        opens immediately and fills in when jj finishes.
+                        Results are cached per commit, so re-blaming an
+                        unchanged file is instant; editing the file (or
+                        anything else that changes @) invalidates the
+                        cache automatically.  In a |jj-object-buffer| for a file at an old
                         revision, annotates as of that revision.  Extra
                         arguments are passed to `jj file annotate`.
                         Running it again (from either window) closes the
@@ -213,6 +219,16 @@ g:jj_executable                                 *g:jj_executable*
 g:jj_color                                      *g:jj_color*
         Set to 0 to disable ANSI color rendering in output windows.
         Default: 1
+
+g:jj_blame_async                                *g:jj_blame_async*
+        Set to 0 to make :J blame block until jj finishes instead of
+        filling the window in asynchronously.  Default: 1
+
+                                                *jj#BlameWait()*
+jj#BlameWait([{timeout}])
+        Wait (up to {timeout} seconds, default 15) for a pending
+        asynchronous blame to fill in.  Returns 1 when nothing is pending.
+        Useful in scripts and tests.
 
 g:jj_blame_template                             *g:jj_blame_template*
         jj template used for each annotation line in :J blame.  It should
