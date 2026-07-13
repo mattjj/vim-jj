@@ -50,10 +50,14 @@ COMMANDS                                        *jj-commands*
                         left.  Annotation runs asynchronously (jj can take
                         a while on files with deep history): the pane
                         opens immediately and fills in when jj finishes.
-                        Results are cached per commit, so re-blaming an
-                        unchanged file is instant; editing the file (or
-                        anything else that changes @) invalidates the
-                        cache automatically.  In a |jj-object-buffer| for a file at an old
+                        Results are cached per commit - in memory and on
+                        disk (see |g:jj_cache_dir|) - so re-blaming an
+                        unchanged file is instant, including across Vim
+                        restarts and between concurrent Vim instances.
+                        Editing the file (or anything else that changes @)
+                        invalidates the cache automatically: entries are
+                        keyed by immutable commit id, so they can never be
+                        stale.  In a |jj-object-buffer| for a file at an old
                         revision, annotates as of that revision.  Extra
                         arguments are passed to `jj file annotate`.
                         Running it again (from either window) closes the
@@ -223,6 +227,14 @@ g:jj_color                                      *g:jj_color*
 g:jj_blame_async                                *g:jj_blame_async*
         Set to 0 to make :J blame block until jj finishes instead of
         filling the window in asynchronously.  Default: 1
+
+g:jj_cache_dir                                  *g:jj_cache_dir*
+        Where blame annotations are cached on disk.  By default each
+        workspace caches under its own .jj/vim-jj/cache directory - .jj
+        is never tracked, so nothing needs adding to .gitignore (this is
+        the same trick fugitive uses with .git).  Set to an absolute path
+        to use one shared directory instead, or to '' to disable the disk
+        cache.  At most 50 entries are kept, oldest evicted.
 
                                                 *jj#BlameWait()*
 jj#BlameWait([{timeout}])

@@ -528,6 +528,14 @@ function! s:Blame(mods, args) abort
       call s:BlameOpen(root, path, s:annotate_cache.data[key], 0)
       return ''
     endif
+    let lines = s:DiskCacheRead(root, key)
+    if !empty(lines)
+      " Promote to the in-memory cache (which also refreshes the disk
+      " entry's mtime, keeping the pruning LRU-ish).
+      call s:BlameCacheStore(root, key, lines)
+      call s:BlameOpen(root, path, lines, 0)
+      return ''
+    endif
     let cmd = ['file', 'annotate', '-r', cid, '-T', template,
           \ '--', root . '/' . path]
     let ignore_wc = 1
@@ -540,13 +548,13 @@ function! s:Blame(mods, args) abort
 
   if get(g:, 'jj_blame_async', 1) && (exists('*job_start') || exists('*jobstart'))
     let bufnr = s:BlameOpen(root, path, ['annotating...'], 1)
-    call s:BlameStartJob(s:Argv(root, cmd, ignore_wc, 0), bufnr, key)
+    call s:BlameStartJob(root, s:Argv(root, cmd, ignore_wc, 0), bufnr, key)
   else
     let [lines, status] = s:JJContent(root, cmd, ignore_wc)
     if status
       call s:throw(join(lines, ' '))
     endif
-    call s:BlameCacheStore(key, lines)
+    call s:BlameCacheStore(root, key, lines)
     call s:BlameOpen(root, path, lines, 0)
   endif
   return ''
@@ -611,7 +619,7 @@ function! s:BlameFillHere(lines, pending) abort
   syncbind
 endfunction
 
-function! s:BlameCacheStore(key, lines) abort
+function! s:BlameCacheStore(root, key, lines) abort
   if empty(a:key)
     return
   endif
@@ -622,11 +630,70 @@ function! s:BlameCacheStore(key, lines) abort
     endif
   endif
   let s:annotate_cache.data[a:key] = a:lines
+  call s:DiskCacheWrite(a:root, a:key, a:lines)
 endfunction
 
-function! s:BlameStartJob(argv, bufnr, key) abort
+" Disk cache: annotations are keyed by (root, commit id, path, template)
+" and commits are immutable, so entries can never go stale and survive
+" across Vim sessions (and are shared between concurrent Vim instances).
+" Lives inside the workspace's .jj directory by default - per-repo and
+" never tracked, no .gitignore required, the same way fugitive keeps its
+" state under .git.  g:jj_cache_dir overrides with a single shared
+" directory; set it to '' to disable the disk cache.
+function! s:DiskCacheFile(root, key) abort
+  if !exists('*sha256') || empty(a:key)
+    return ''
+  endif
+  if exists('g:jj_cache_dir')
+    let dir = g:jj_cache_dir
+  else
+    let dir = a:root . '/.jj/vim-jj/cache'
+  endif
+  return empty(dir) ? '' : dir . '/' . sha256(a:key) . '.json'
+endfunction
+
+function! s:DiskCacheRead(root, key) abort
+  let file = s:DiskCacheFile(a:root, a:key)
+  if empty(file) || !filereadable(file)
+    return []
+  endif
+  try
+    let data = json_decode(join(readfile(file), "\n"))
+  catch
+    return []
+  endtry
+  if type(data) != type({}) || get(data, 'key', '') !=# a:key
+    return []
+  endif
+  return get(data, 'lines', [])
+endfunction
+
+function! s:DiskCacheWrite(root, key, lines) abort
+  let file = s:DiskCacheFile(a:root, a:key)
+  if empty(file)
+    return
+  endif
+  let dir = fnamemodify(file, ':h')
+  try
+    if !isdirectory(dir)
+      call mkdir(dir, 'p', 0700)
+    endif
+    call writefile([json_encode({'key': a:key, 'lines': a:lines})], file)
+  catch
+    return
+  endtry
+  let files = glob(dir . '/*.json', 1, 1)
+  if len(files) > 50
+    call sort(files, {a, b -> getftime(a) - getftime(b)})
+    for stale in files[: len(files) - 51]
+      call delete(stale)
+    endfor
+  endif
+endfunction
+
+function! s:BlameStartJob(root, argv, bufnr, key) abort
   let ctx = {'out': [], 'err': [], 'bufnr': a:bufnr, 'key': a:key,
-        \ 'closed': 0, 'status': -1}
+        \ 'root': a:root, 'closed': 0, 'status': -1}
   if exists('*job_start')
     " Vim: out/err arrive line-wise; close_cb and exit_cb can come in
     " either order, so finish only once we have both.
@@ -676,7 +743,7 @@ function! s:BlameJobDone(ctx, status) abort
           \ + filter(a:ctx.err + lines, '!empty(v:val)')
     echohl WarningMsg | echomsg 'jj: blame failed' | echohl NONE
   else
-    call s:BlameCacheStore(a:ctx.key, lines)
+    call s:BlameCacheStore(a:ctx.root, a:ctx.key, lines)
     let s:blame_fill = lines
   endif
   call win_execute(wins[0], 'call s:BlameFillHere(s:blame_fill, 0)')

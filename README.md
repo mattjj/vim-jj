@@ -112,7 +112,9 @@ let g:jj_blame_template = '...' " jj template for blame annotation lines
 - `jj file annotate` can be slow on files with deep history (it's much
   younger than `git blame`). vim-jj compensates: blame runs as an async
   job (the pane opens instantly and fills in), and results are cached per
-  commit, so re-blaming an unchanged file is instant.
+  commit — in memory and on disk under `.jj/vim-jj/cache/` (never tracked,
+  no `.gitignore` needed) — so re-blaming an unchanged file is instant,
+  even across Vim restarts.
 - No `:Gwrite`/staging analogue — jj doesn't have an index, so a good
   chunk of fugitive has no jj counterpart anyway.
 
