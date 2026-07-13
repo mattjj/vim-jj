@@ -216,7 +216,7 @@ function! jj#BufReadCmd(amatch) abort
       return 'echoerr ' . string('jj: ' . join(lines, ' '))
     endif
     if empty(path)
-      setlocal filetype=git
+      setlocal filetype=jjshow
       call s:MapHunkNav()
     else
       exe 'doautocmd filetypedetect BufRead ' . fnameescape(root . '/' . path)
@@ -966,7 +966,7 @@ function! jj#Command(bang, mods, arg) abort
             \ format ? '' : 'diff')
     elseif sub ==# 'show'
       let format = !empty(filter(copy(rest), 'v:val =~# s:diff_format_flags'))
-      return s:Output(a:mods, args + (format ? [] : ['--git']), 'git')
+      return s:Output(a:mods, args + (format ? [] : ['--git']), 'jjshow')
     else
       return s:Output(a:mods, args, '')
     endif
