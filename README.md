@@ -42,6 +42,7 @@ fugitive | vim-jj | what it does
 `:Gdiffsplit!` | `:J diffsplit!` | three-pane merge view for a conflicted file: side 1 \| working file \| side 2, all in diff mode, with fugitive's `d2o`/`d3o` to pull a conflict region from the left/right pane and `dp` in a side pane to push; resolve, `:w`, done (jj has no "mark resolved" step)
 `:Gedit` | `:J edit {object}` | open a read-only buffer for a jj object: `:J edit @-` (the current file as of `@-`), `:J edit main:src/foo.py` (another file at a revision); commit views (`jj show`-style) come from `:J show @-` or `<CR>` in log/blame
 `:Gsplit` etc. | `:J split` / `:J vsplit` / `:J tabedit` / `:J pedit` | same, in a split/tab/preview window
+`:GBrowse` | `:J browse` | yank a permalink to the current line on GitHub, pinned at a commit (`:'<,'>J browse` for a line range, `:J browse!` to also open it); derived from the repo's git remote, pinning the nearest pushed ancestor of `@` (or the exact commit in an object buffer)
 `:Git <anything>` | `:J <anything>` | any other subcommand is passed through to jj and its output shown in a scratch window: `:J`, (= `jj status`), `:J log`, `:J new`, `:J describe -m msg`, `:J op log`, ...
 
 ## Pretty things

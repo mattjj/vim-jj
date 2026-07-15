@@ -1157,7 +1157,121 @@ endfunction
 
 " Section: :J dispatcher
 
-function! jj#Command(bang, mods, arg) abort
+" Section: :J browse
+"
+" Yank (and optionally open) a permalink to the current line on the git
+" host, pinned at a commit - fugitive's :GBrowse, jj-flavored.  The web
+" URL comes from the repo's git remote (origin, or the sole remote).
+
+function! s:RemoteToWeb(url) abort
+  let url = substitute(a:url, '\.git$', '', '')
+  let m = matchlist(url, '^\%(https\=\|git\|ssh\)://\%([^@/]*@\)\=\([^/]\+\)/\(.\+\)$')
+  if !empty(m)
+    return 'https://' . m[1] . '/' . m[2]
+  endif
+  " scp-like: [user@]host:owner/repo
+  let m = matchlist(url, '^\%([^@/]*@\)\=\([^:/]\+\):\(.\+\)$')
+  if !empty(m)
+    return 'https://' . m[1] . '/' . m[2]
+  endif
+  return ''
+endfunction
+
+" Percent-encode a repo-relative path for use in a URL, byte-wise.
+function! s:UrlPath(path) abort
+  let out = ''
+  for i in range(len(a:path))
+    let byte = a:path[i]
+    let out .= byte =~# '[A-Za-z0-9/._~-]' ? byte : printf('%%%02X', char2nr(byte))
+  endfor
+  return out
+endfunction
+
+function! s:Browse(bang, line1, line2, count) abort
+  let root = s:Root()
+  let [remotes, status] = s:JJ(root, ['git', 'remote', 'list'], 1)
+  if status
+    call s:throw(join(remotes, ' '))
+  endif
+  let urls = {}
+  let order = []
+  for line in remotes
+    let m = matchlist(line, '^\(\S\+\)\s\+\(\S\+\)$')
+    if !empty(m)
+      let urls[m[1]] = m[2]
+      call add(order, m[1])
+    endif
+  endfor
+  if empty(order)
+    call s:throw('no git remote configured; :J git remote add one first')
+  endif
+  let base = s:RemoteToWeb(urls[has_key(urls, 'origin') ? 'origin' : order[0]])
+  if empty(base)
+    call s:throw('cannot parse remote url: ' . urls[has_key(urls, 'origin') ? 'origin' : order[0]])
+  endif
+
+  let warn = ''
+  if bufname('%') =~# '^jj://'
+    let [ignored, cid, path] = s:ParseUrl(bufname('%'))
+    if empty(path)
+      " a commit view: link to the commit itself
+      return s:BrowseFinish(base . '/commit/' . cid, a:bang, '')
+    endif
+  else
+    let path = s:BufPath(root)
+    " @ only exists locally; pin to the nearest ancestor that a remote
+    " actually has.
+    try
+      let cid = s:ResolveRev(root, 'latest(::@ & remote_bookmarks())')
+    catch /^jj:/
+      call s:throw('no ancestor of @ is on any remote bookmark; push first')
+    endtry
+    let [pinned, st] = s:JJContent(root, ['file', 'show', '-r', cid, '--', s:Fileset(path)], 1)
+    if st
+      call s:throw('file does not exist at pinned commit '
+            \ . strpart(cid, 0, 12) . ': ' . join(pinned, ' '))
+    endif
+    if pinned !=# getline(1, '$')
+      let warn = 'buffer differs from pinned commit '
+            \ . strpart(cid, 0, 12) . '; line numbers may be off'
+    endif
+  endif
+  if a:count > 0
+    let anchor = '#L' . a:line1 . (a:line2 > a:line1 ? '-L' . a:line2 : '')
+  else
+    let anchor = '#L' . line('.')
+  endif
+  return s:BrowseFinish(base . '/blob/' . cid . '/' . s:UrlPath(path) . anchor,
+        \ a:bang, warn)
+endfunction
+
+function! s:BrowseFinish(url, bang, warn) abort
+  call setreg('"', a:url)
+  if has('clipboard')
+    silent! call setreg('+', a:url)
+    silent! call setreg('*', a:url)
+  endif
+  if a:bang
+    let opener = has('mac') && executable('open') ? 'open'
+          \ : executable('xdg-open') ? 'xdg-open' : ''
+    if empty(opener)
+      echohl WarningMsg | echomsg 'jj: no browser opener found (xdg-open/open)' | echohl NONE
+    elseif exists('*job_start')
+      call job_start([opener, a:url])
+    elseif exists('*jobstart')
+      call jobstart([opener, a:url])
+    else
+      call system(shellescape(opener) . ' ' . shellescape(a:url) . ' &')
+    endif
+  endif
+  echo a:url
+  if !empty(a:warn)
+    echohl WarningMsg | echomsg 'jj: ' . a:warn | echohl NONE
+  endif
+  return ''
+endfunction
+
+function! jj#Command(bang, mods, arg, ...) abort
   " Any :J command may change the repo; don't serve stale statuslines.
   let s:statusline_cache = {}
   try
@@ -1168,6 +1282,9 @@ function! jj#Command(bang, mods, arg) abort
       return s:Output(a:mods, ['status'], '')
     elseif sub ==# 'blame' || sub ==# 'annotate'
       return s:Blame(a:mods, rest)
+    elseif sub ==# 'browse' || sub ==# 'browse!'
+      return s:Browse(a:bang || sub =~# '!$',
+            \ a:0 > 0 ? a:1 : 0, a:0 > 1 ? a:2 : 0, a:0 > 2 ? a:3 : 0)
     elseif sub ==# 'diffsplit' || sub ==# 'diffsplit!'
       return s:DiffSplit(a:mods, join(rest, ' '), a:bang || sub =~# '!$')
     elseif sub =~# '^\%(edit\|split\|vsplit\|tabedit\|pedit\)$'
@@ -1202,7 +1319,7 @@ function! s:CompleteRevset(arglead) abort
 endfunction
 
 function! jj#Complete(arglead, cmdline, cursorpos) abort
-  let subcommands = ['blame', 'diff', 'diffsplit', 'edit', 'split', 'vsplit',
+  let subcommands = ['blame', 'browse', 'diff', 'diffsplit', 'edit', 'split', 'vsplit',
         \ 'tabedit', 'pedit', 'status', 'log', 'show', 'describe', 'new',
         \ 'commit', 'squash', 'abandon', 'bookmark', 'rebase', 'restore',
         \ 'resolve', 'undo', 'op', 'workspace', 'file', 'evolog', 'absorb']

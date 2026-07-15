@@ -108,6 +108,25 @@ COMMANDS                                        *jj-commands*
 :J tabedit {object}     ... new tab.
 :J pedit {object}       ... preview window.
 
+                                                *:J-browse*
+:J browse               Yank a permalink to the current line on the git
+:{range}J browse        host (GitHub et al.), pinned at a commit - like
+                        fugitive's :GBrowse.  The URL lands in the unnamed
+                        register (and the system clipboard when
+                        available) and is echoed.  A range selects a line
+                        span: `:'<,'>J browse` yields #L4-L9.  With ! the
+                        link is also opened in a browser (xdg-open/open).
+
+                        The web URL is derived from `jj git remote list`
+                        (origin, or the sole remote; https and ssh remote
+                        forms both work).  In a |jj-object-buffer| the
+                        link pins that buffer's commit; a commit view
+                        links to the commit page itself.  For a
+                        working-copy file it pins the nearest ancestor of
+                        @ that a remote bookmark points to (@ itself only
+                        exists locally), and warns if your file differs
+                        from that commit, since line numbers may be off.
+
                                                 *:J-show*
 :J show [args]          `jj show --git` output in a scratch window with
                         commit/diff highlighting.
