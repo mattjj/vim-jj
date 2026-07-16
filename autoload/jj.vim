@@ -1294,21 +1294,76 @@ function! s:PrFromDesc(desc) abort
   return str2nr(n)
 endfunction
 
-function! s:PrNumber(root, cid) abort
-  " the commit itself carries a squash/merge marker
+" Exact: the commit's own subject carries a squash/merge marker.
+function! s:PrDescNumber(root, cid) abort
   let [out, status] = s:JJ(a:root, ['log', '--no-graph', '-n', '1', '-r', a:cid,
         \ '-T', 'description.first_line() ++ "\n"'], 1)
-  if !status
-    let pr = s:PrFromDesc(get(out, 0, ''))
-    if pr
-      return pr
-    endif
-  endif
-  " earliest merge on the way from the commit to trunk
+  return status ? 0 : s:PrFromDesc(get(out, 0, ''))
+endfunction
+
+" Heuristic: earliest merge on the way from the commit to trunk.  Only
+" meaningful for commits that actually arrived via a merged branch; for
+" direct pushes it names a nearby unrelated PR, so it is used only when
+" the API cannot be reached.
+function! s:PrMergeNumber(root, cid) abort
   let [out, status] = s:JJ(a:root, ['log', '--no-graph', '-n', '1',
         \ '-r', 'roots(descendants(' . a:cid . ') & ::trunk() & merges())',
         \ '-T', 'description.first_line() ++ "\n"'], 1)
   return status ? 0 : s:PrFromDesc(get(out, 0, ''))
+endfunction
+
+" Authoritative: GitHub's commit->pulls endpoint.  Returns
+" ['ok', url] | ['none', ''] (definitively no PR) | ['unavailable', ''].
+function! s:PrFromApi(base, cid) abort
+  if !get(g:, 'jj_pr_api', 1) || !executable('curl')
+    return ['unavailable', '']
+  endif
+  if exists('g:jj_pr_api_url')
+    let api = g:jj_pr_api_url
+  else
+    let m = matchlist(a:base, '^https://\([^/]\+\)/\(.\+\)$')
+    if empty(m)
+      return ['unavailable', '']
+    endif
+    let api = m[1] ==# 'github.com'
+          \ ? 'https://api.github.com/repos/' . m[2]
+          \ : 'https://' . m[1] . '/api/v3/repos/' . m[2]
+  endif
+  let cmd = ['curl', '-fsS', '--max-time', '5',
+        \ '-H', 'Accept: application/vnd.github+json']
+  let token = !empty($GITHUB_TOKEN) ? $GITHUB_TOKEN : $GH_TOKEN
+  if !empty(token)
+    let cmd += ['-H', 'Authorization: Bearer ' . token]
+  endif
+  let cmd += [api . '/commits/' . a:cid . '/pulls']
+  let out = system(join(map(copy(cmd), 'shellescape(v:val)'), ' ') . ' 2>/dev/null')
+  if v:shell_error
+    return ['unavailable', '']
+  endif
+  try
+    let data = json_decode(out)
+  catch
+    return ['unavailable', '']
+  endtry
+  if type(data) != type([])
+    return ['unavailable', '']
+  endif
+  if empty(data)
+    return ['none', '']
+  endif
+  " prefer a PR that was actually merged
+  let pick = data[0]
+  for pr in data
+    if type(pr) == type({}) && !empty(get(pr, 'merged_at', ''))
+      let pick = pr
+      break
+    endif
+  endfor
+  let url = get(pick, 'html_url', '')
+  if empty(url) && get(pick, 'number', 0)
+    let url = a:base . '/pull/' . pick.number
+  endif
+  return empty(url) ? ['none', ''] : ['ok', url]
 endfunction
 
 function! s:Pr(bang) abort
@@ -1339,12 +1394,26 @@ function! s:Pr(bang) abort
     let cid = s:ResolveRev(root, change)
   endif
 
-  let pr = s:PrNumber(root, cid)
+  " Cascade: exact subject marker -> GitHub API (authoritative) -> local
+  " merge heuristic only when the API cannot be reached -> commit page.
+  let pr = s:PrDescNumber(root, cid)
   if pr
     return s:BrowseFinish(base . '/pull/' . pr, a:bang, '')
   endif
+  let [state, url] = s:PrFromApi(base, cid)
+  if state ==# 'ok'
+    return s:BrowseFinish(url, a:bang, '')
+  endif
+  if state ==# 'unavailable'
+    let pr = s:PrMergeNumber(root, cid)
+    if pr
+      return s:BrowseFinish(base . '/pull/' . pr, a:bang,
+            \ 'GitHub API unreachable; PR guessed from local merge history'
+            \ . ' and may be approximate')
+    endif
+  endif
   return s:BrowseFinish(base . '/commit/' . cid, a:bang,
-        \ 'no PR reference found locally; linking the commit page instead'
+        \ 'no PR found for this commit; linking the commit page instead'
         \ . ' (GitHub lists associated PRs there)')
 endfunction
 

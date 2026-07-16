@@ -43,7 +43,7 @@ fugitive | vim-jj | what it does
 `:Gedit` | `:J edit {object}` | open a read-only buffer for a jj object: `:J edit @-` (the current file as of `@-`), `:J edit main:src/foo.py` (another file at a revision); commit views (`jj show`-style) come from `:J show @-` or `<CR>` in log/blame
 `:Gsplit` etc. | `:J split` / `:J vsplit` / `:J tabedit` / `:J pedit` | same, in a split/tab/preview window
 `:GBrowse` | `:J browse` | yank a permalink to the current line on GitHub, pinned at a commit (`:'<,'>J browse` for a line range, `:J browse!` to also open it); derived from the repo's git remote, pinning the nearest pushed ancestor of `@` (or the exact commit in an object buffer)
-_(no equivalent)_ | `:J pr` | yank/open the pull request that introduced the current line — resolved offline from squash-merge `(#N)` subjects or `Merge pull request #N` merge commits, falling back to the commit page; works in file buffers, the blame pane, and commit views
+_(no equivalent)_ | `:J pr` | yank/open the pull request that introduced the current line — resolved from squash/merge subject markers, then GitHub's API (`$GITHUB_TOKEN` honored; offline merge-heuristic fallback), then the commit page; works in file buffers, the blame pane, and commit views
 `:Git <anything>` | `:J <anything>` | any other subcommand is passed through to jj and its output shown in a scratch window: `:J`, (= `jj status`), `:J log`, `:J new`, `:J describe -m msg`, `:J op log`, ...
 
 ## Pretty things

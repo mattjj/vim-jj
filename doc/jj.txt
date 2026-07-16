@@ -130,21 +130,30 @@ COMMANDS                                        *jj-commands*
                                                 *:J-pr*
 :J pr                   Yank a link to the pull request that introduced
                         the current line; with ! also open it in a
-                        browser.  Works offline: the line is blamed (via
-                        the same cache :J blame uses), and the commit is
-                        mapped to a PR from local history - a squash
-                        merge carries "(#N)" at the end of its subject,
-                        and a merge-style PR is the earliest merge commit
-                        between the blamed commit and trunk() with a
-                        "Merge pull request #N" subject.  If neither
-                        marker exists (rebase-merged PRs, direct pushes,
-                        unpushed commits), the commit page is linked
-                        instead - GitHub shows associated PRs there.
+                        browser.  The line is blamed (via the same cache
+                        :J blame uses) and its commit mapped to a PR by
+                        cascading through:
+
+                        1. the commit's own subject: squash merges end in
+                           "(#N)", merge commits say "Merge pull request
+                           #N" - exact and offline;
+                        2. GitHub's commit->pulls API via curl -
+                           authoritative, correctly reports "no PR" for
+                           direct-pushed commits.  Uses $GITHUB_TOKEN or
+                           $GH_TOKEN when set (rate limits, private
+                           repos), and GitHub Enterprise hosts get
+                           /api/v3 automatically;
+                        3. only if the API is unreachable (offline, no
+                           curl): the earliest merge commit between the
+                           blamed commit and trunk(), flagged as
+                           approximate - for direct-pushed commits this
+                           can name a nearby unrelated PR;
+                        4. otherwise the commit page, where GitHub lists
+                           any associated PRs.
+
                         In the :J blame pane, the line under the cursor
                         drives it; in a commit view, you get that
-                        commit's own PR.  Heuristic caveat: for commits
-                        pushed straight to the main branch, the "earliest
-                        merge" rule can name a nearby unrelated PR.
+                        commit's own PR.
 
                                                 *:J-show*
 :J show [args]          `jj show --git` output in a scratch window with
@@ -265,6 +274,15 @@ g:jj_color                                      *g:jj_color*
 g:jj_blame_async                                *g:jj_blame_async*
         Set to 0 to make :J blame block until jj finishes instead of
         filling the window in asynchronously.  Default: 1
+
+g:jj_pr_api                                     *g:jj_pr_api*
+        Set to 0 to keep :J pr fully offline (subject markers and the
+        merge heuristic only; no curl).  Default: 1
+
+g:jj_pr_api_url                                 *g:jj_pr_api_url*
+        Override the repo API prefix :J pr queries (the endpoint used is
+        {prefix}/commits/{sha}/pulls).  Normally derived from the remote
+        host; useful for unusual GitHub Enterprise setups.
 
 g:jj_cache_dir                                  *g:jj_cache_dir*
         Where blame annotations are cached on disk.  By default each
