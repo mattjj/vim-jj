@@ -1187,9 +1187,9 @@ function! s:UrlPath(path) abort
   return out
 endfunction
 
-function! s:Browse(bang, line1, line2, count) abort
-  let root = s:Root()
-  let [remotes, status] = s:JJ(root, ['git', 'remote', 'list'], 1)
+" Web URL of the repo, from origin (or the sole remote).
+function! s:RemoteBase(root) abort
+  let [remotes, status] = s:JJ(a:root, ['git', 'remote', 'list'], 1)
   if status
     call s:throw(join(remotes, ' '))
   endif
@@ -1205,11 +1205,17 @@ function! s:Browse(bang, line1, line2, count) abort
   if empty(order)
     call s:throw('no git remote configured; :J git remote add one first')
   endif
-  let base = s:RemoteToWeb(urls[has_key(urls, 'origin') ? 'origin' : order[0]])
+  let url = urls[has_key(urls, 'origin') ? 'origin' : order[0]]
+  let base = s:RemoteToWeb(url)
   if empty(base)
-    call s:throw('cannot parse remote url: ' . urls[has_key(urls, 'origin') ? 'origin' : order[0]])
+    call s:throw('cannot parse remote url: ' . url)
   endif
+  return base
+endfunction
 
+function! s:Browse(bang, line1, line2, count) abort
+  let root = s:Root()
+  let base = s:RemoteBase(root)
   let warn = ''
   if bufname('%') =~# '^jj://'
     let [ignored, cid, path] = s:ParseUrl(bufname('%'))
@@ -1271,6 +1277,96 @@ function! s:BrowseFinish(url, bang, warn) abort
   return ''
 endfunction
 
+" Section: :J pr
+"
+" Yank (and optionally open) the PR that introduced the current line.
+" Works without network access: GitHub squash merges end the subject in
+" (#N), and merge-style PRs are found as the earliest merge commit
+" between the blamed commit and trunk() with a 'Merge pull request #N'
+" subject.  When neither marker exists, fall back to the commit page,
+" where GitHub shows any associated PRs.
+
+function! s:PrFromDesc(desc) abort
+  let n = matchstr(a:desc, '^Merge pull request #\zs\d\+')
+  if empty(n)
+    let n = matchstr(a:desc, '(#\zs\d\+\ze)\s*$')
+  endif
+  return str2nr(n)
+endfunction
+
+function! s:PrNumber(root, cid) abort
+  " the commit itself carries a squash/merge marker
+  let [out, status] = s:JJ(a:root, ['log', '--no-graph', '-n', '1', '-r', a:cid,
+        \ '-T', 'description.first_line() ++ "\n"'], 1)
+  if !status
+    let pr = s:PrFromDesc(get(out, 0, ''))
+    if pr
+      return pr
+    endif
+  endif
+  " earliest merge on the way from the commit to trunk
+  let [out, status] = s:JJ(a:root, ['log', '--no-graph', '-n', '1',
+        \ '-r', 'roots(descendants(' . a:cid . ') & ::trunk() & merges())',
+        \ '-T', 'description.first_line() ++ "\n"'], 1)
+  return status ? 0 : s:PrFromDesc(get(out, 0, ''))
+endfunction
+
+function! s:Pr(bang) abort
+  let root = s:Root()
+  let base = s:RemoteBase(root)
+  let name = bufname('%')
+  if !empty(get(b:, 'jj_blame', {}))
+    " blame pane: the change id is right there on the line
+    let change = matchstr(getline('.'), '^\S\+')
+    if empty(change)
+      call s:throw('no change id on this line')
+    endif
+    let cid = s:ResolveRev(root, change)
+  elseif name =~# '^jj://' && empty(s:ParseUrl(name)[2])
+    " commit view: the PR of this very commit
+    let cid = s:ParseUrl(name)[1]
+  else
+    if &modified
+      call s:throw('buffer is modified; write it first')
+    endif
+    let path = s:BufPath(root)
+    let template = get(g:, 'jj_blame_template', s:blame_template)
+    let lines = s:AnnotateSync(root, path, s:BufRev(root), template)
+    let change = matchstr(get(lines, line('.') - 1, ''), '^\S\+')
+    if empty(change)
+      call s:throw('no annotation for line ' . line('.'))
+    endif
+    let cid = s:ResolveRev(root, change)
+  endif
+
+  let pr = s:PrNumber(root, cid)
+  if pr
+    return s:BrowseFinish(base . '/pull/' . pr, a:bang, '')
+  endif
+  return s:BrowseFinish(base . '/commit/' . cid, a:bang,
+        \ 'no PR reference found locally; linking the commit page instead'
+        \ . ' (GitHub lists associated PRs there)')
+endfunction
+
+" Synchronous annotate through the same memory+disk cache :J blame uses.
+function! s:AnnotateSync(root, path, rev, template) abort
+  let cid = s:ResolveRev(a:root, a:rev)
+  let key = join([a:root, cid, a:path, a:template], "\n")
+  if has_key(s:annotate_cache.data, key)
+    return s:annotate_cache.data[key]
+  endif
+  let lines = s:DiskCacheRead(a:root, key)
+  if empty(lines)
+    let [lines, status] = s:JJContent(a:root, ['file', 'annotate', '-r', cid,
+          \ '-T', a:template, '--', a:root . '/' . a:path], 1)
+    if status
+      call s:throw(join(lines, ' '))
+    endif
+  endif
+  call s:BlameCacheStore(a:root, key, lines)
+  return lines
+endfunction
+
 function! jj#Command(bang, mods, arg, ...) abort
   " Any :J command may change the repo; don't serve stale statuslines.
   let s:statusline_cache = {}
@@ -1282,6 +1378,8 @@ function! jj#Command(bang, mods, arg, ...) abort
       return s:Output(a:mods, ['status'], '')
     elseif sub ==# 'blame' || sub ==# 'annotate'
       return s:Blame(a:mods, rest)
+    elseif sub ==# 'pr' || sub ==# 'pr!'
+      return s:Pr(a:bang || sub =~# '!$')
     elseif sub ==# 'browse' || sub ==# 'browse!'
       return s:Browse(a:bang || sub =~# '!$',
             \ a:0 > 0 ? a:1 : 0, a:0 > 1 ? a:2 : 0, a:0 > 2 ? a:3 : 0)
@@ -1319,7 +1417,7 @@ function! s:CompleteRevset(arglead) abort
 endfunction
 
 function! jj#Complete(arglead, cmdline, cursorpos) abort
-  let subcommands = ['blame', 'browse', 'diff', 'diffsplit', 'edit', 'split', 'vsplit',
+  let subcommands = ['blame', 'browse', 'pr', 'diff', 'diffsplit', 'edit', 'split', 'vsplit',
         \ 'tabedit', 'pedit', 'status', 'log', 'show', 'describe', 'new',
         \ 'commit', 'squash', 'abandon', 'bookmark', 'rebase', 'restore',
         \ 'resolve', 'undo', 'op', 'workspace', 'file', 'evolog', 'absorb']

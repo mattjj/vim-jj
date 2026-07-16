@@ -127,6 +127,25 @@ COMMANDS                                        *jj-commands*
                         exists locally), and warns if your file differs
                         from that commit, since line numbers may be off.
 
+                                                *:J-pr*
+:J pr                   Yank a link to the pull request that introduced
+                        the current line; with ! also open it in a
+                        browser.  Works offline: the line is blamed (via
+                        the same cache :J blame uses), and the commit is
+                        mapped to a PR from local history - a squash
+                        merge carries "(#N)" at the end of its subject,
+                        and a merge-style PR is the earliest merge commit
+                        between the blamed commit and trunk() with a
+                        "Merge pull request #N" subject.  If neither
+                        marker exists (rebase-merged PRs, direct pushes,
+                        unpushed commits), the commit page is linked
+                        instead - GitHub shows associated PRs there.
+                        In the :J blame pane, the line under the cursor
+                        drives it; in a commit view, you get that
+                        commit's own PR.  Heuristic caveat: for commits
+                        pushed straight to the main branch, the "earliest
+                        merge" rule can name a nearby unrelated PR.
+
                                                 *:J-show*
 :J show [args]          `jj show --git` output in a scratch window with
                         commit/diff highlighting.
